@@ -1,0 +1,15 @@
+# Request: Target pose for LINEAR Cartesian motion (TF format)
+# Translation (xyz)
+float64 trans_x     # Translation X (meters)
+float64 trans_y     # Translation Y (meters)
+float64 trans_z     # Translation Z (meters)
+# Rotation (xyzw quaternion)
+float64 rot_x       # Rotation quaternion X component
+float64 rot_y       # Rotation quaternion Y component
+float64 rot_z       # Rotation quaternion Z component
+float64 rot_w       # Rotation quaternion W component
+---
+# Response
+bool success        # Whether Cartesian path planning succeeded
+string message      # Status or error message
+float64 fraction    # Fraction of path achieved (0.0 to 1.0)

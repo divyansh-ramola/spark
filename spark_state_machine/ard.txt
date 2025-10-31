@@ -1,0 +1,446 @@
+// =======================
+// === PIN DEFINITIONS ===
+// =======================
+
+// Stepper 1 (TB6600 - Linear Axis)
+#define TB_STEP_PIN     3    // Step pulse pin
+#define TB_DIR_PIN      2    // Direction control pin
+#define TB_ENABLE_PIN   4    // Enable pin (active LOW)
+#define TB_LIMIT_PIN    26  // Limit switch pin (Normally Open + Common)
+
+// Stepper 2 (TB6600 - Gripper) - Changed from DRV8825
+#define TB2_STEP_PIN    5    // Step pulse pin
+#define TB2_DIR_PIN     6    // Direction control pin
+#define TB2_ENABLE_PIN  7    // Enable pin (active LOW)
+#define TB2_LIMIT_PIN   22   // Limit switch pin for gripper open detection (NO + C)
+
+// Servo Gripper
+#define SERVO_PIN       8    // PWM signal pin for servo
+#define SERVO_LIMIT_PIN 24   // Limit switch pin for servo gripper (NO + C)
+
+// Relay Control
+#define RELAY_PIN       10   // Relay control pin
+
+// ============================
+// === USER CONFIGURATION  ====
+// ============================
+
+// Linear axis TB6600 configuration
+const float leadScrewPitchMM = 2.0;
+const int stepsPerRevolution = 200;
+const int microsteppingTB6600 = 2;
+const int stepsPerMM = (stepsPerRevolution * microsteppingTB6600) / leadScrewPitchMM;
+const int tbMoveSpeedUS = 400;
+const int tbHomingSpeedUS = 50;
+const bool tbHomingDir = LOW;
+const bool tbWorkingDir = HIGH;
+const float tbTravelAfterHomeMM = 50;
+
+// Gripper TB6600 configuration (changed from DRV8825)
+const int tb2Microstepping = 2;           // TB6600 microstepping (typically 2, 4, 8, or 16)
+const int tb2StepsPerRev = 200;          // Standard stepper motor steps per revolution
+const int tb2StepsToClose = 100;         // Increased from 50 due to microstepping
+const int tb2StepDelayUS = 1000;         // TB6600 typically needs longer delays than DRV8825
+const int tb2PulseWidthUS = 10;          // Minimum pulse width for TB6600
+const bool gripperOpenDirection  = HIGH;
+const bool gripperCloseDirection = LOW;
+
+// Servo configuration
+const int servoCloseRotationDegrees = 150;
+const int servoStepDelay = 5;
+const int servoStartAngle = 90;
+const int servoMinOpenDegrees = 60;  
+bool relayState = LOW;
+
+float x = 0.0;
+float moveDistance = 50;
+float moveDistance1 = 20.0; // Changed to 20mm for backwards movement
+
+// ====================
+// === LIBRARIES ======
+// ====================
+#include <Servo.h>
+Servo servoGripper;
+
+// =====================
+// === SETUP BLOCK =====
+// =====================
+void setup() {
+  // Linear axis TB6600 setup
+  pinMode(TB_STEP_PIN, OUTPUT);
+  pinMode(TB_DIR_PIN, OUTPUT);
+  pinMode(TB_ENABLE_PIN, OUTPUT);
+  pinMode(TB_LIMIT_PIN, INPUT_PULLUP);
+
+  // Gripper TB6600 setup (changed from DRV8825)
+  pinMode(TB2_STEP_PIN, OUTPUT);
+  pinMode(TB2_DIR_PIN, OUTPUT);
+  pinMode(TB2_ENABLE_PIN, OUTPUT);
+  pinMode(TB2_LIMIT_PIN, INPUT_PULLUP);
+
+  pinMode(SERVO_LIMIT_PIN, INPUT_PULLUP);
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, relayState);
+
+  digitalWrite(TB_STEP_PIN, LOW);
+  digitalWrite(TB2_STEP_PIN, LOW);
+
+  // Enable both TB6600 drivers (active LOW)
+  digitalWrite(TB_ENABLE_PIN, LOW);
+  digitalWrite(TB2_ENABLE_PIN, LOW);
+
+  servoGripper.attach(SERVO_PIN);
+  servoGripper.write(servoStartAngle);
+
+  Serial.begin(9600);
+  Serial.println("System ready for ROS2 commands...");
+  Serial.println("Commands:");
+  Serial.println("SEQ1 - Execute Sequence 1 (open servo, close stepper, close servo, move forward)");
+  Serial.println("SEQ2 - Open both grippers + move 20mm backwards");
+  Serial.println("SET_X <value> - Set x variable for distance calculation");
+  Serial.println("TOGGLE_RELAY - Toggle relay state (LOW <-> HIGH)");
+  Serial.print("Initial relay state: ");
+  Serial.println(relayState ? "HIGH" : "LOW");
+}
+
+// =====================
+// === MAIN LOOP =======
+// =====================
+void loop() {
+  if (Serial.available() > 0) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();
+    processCommand(command);
+  }
+
+  // Ensure both TB6600 drivers remain enabled for holding torque
+  digitalWrite(TB_ENABLE_PIN, LOW);
+  digitalWrite(TB2_ENABLE_PIN, LOW);
+}
+
+// ===============================
+// === PROCESS SERIAL COMMANDS ===
+// ===============================
+void processCommand(String cmd) {
+  Serial.print("Received command: ");
+  Serial.println(cmd);
+
+  if (cmd == "SEQ1") {
+    executeSequence1();
+  } else if (cmd == "SEQ2") {
+    executeSequence2();
+  } else if (cmd == "TOGGLE_RELAY") {
+    toggleRelay();
+  } else if (cmd.startsWith("SET_X ")) {
+    float newX = cmd.substring(6).toFloat();
+    x = newX;
+    moveDistance = 50.0;
+    Serial.print("X variable set to: ");
+    Serial.println(x);
+  } else {
+    Serial.println("Unknown command. Available: SEQ1, SEQ2, SET_X <val>, TOGGLE_RELAY");
+  }
+}
+
+// ========================
+// === RELAY CONTROL ======
+// ========================
+void toggleRelay() {
+  relayState = !relayState;
+  digitalWrite(RELAY_PIN, relayState);
+  Serial.print("Relay toggled to: ");
+  Serial.println(relayState ? "HIGH" : "LOW");
+}
+
+// ========================
+// === SEQUENCE 1 =========
+// ========================
+void executeSequence1() {
+  Serial.println("=== EXECUTING SEQUENCE 1 ===");
+
+  openServoGripper(); delay(500);
+  homeLinearAxis(); delay(500);
+
+  closeStepperGripper(); delay(500);
+  delay(500);
+  closeServoGripper(); 
+
+  Serial.print("Step 4: Moving linear axis by ");
+  Serial.print(moveDistance);
+  Serial.println(" mm...");
+  moveLinearAxis(moveDistance);
+
+  Serial.println("=== SEQUENCE 1 COMPLETE ===");
+}
+
+// ========================
+// === SEQUENCE 2 =========
+// ========================
+void executeSequence2() {
+  Serial.println("=== EXECUTING SEQUENCE 2 ===");
+  closeStepperGripper(); delay(500);
+  //openStepperGripper(); delay(200);
+  openServoGripper(); delay(500);
+  //moveLinearAxisBackwards(moveDistance1);
+
+  Serial.println("=== SEQUENCE 2 COMPLETE ===");
+}
+
+
+// ============================
+// === HOMING LOGIC ==========
+// ============================
+void homeLinearAxis() {
+  digitalWrite(TB_DIR_PIN, tbHomingDir);
+  Serial.println("Homing started...");
+
+  while (true) {
+    if (digitalRead(TB_LIMIT_PIN) == LOW) {
+      delay(20);
+      if (digitalRead(TB_LIMIT_PIN) == LOW) {
+        Serial.println("Limit switch pressed — Homing complete.");
+        break;
+      }
+    }
+    digitalWrite(TB_STEP_PIN, HIGH); delayMicroseconds(tbHomingSpeedUS);
+    digitalWrite(TB_STEP_PIN, LOW); delayMicroseconds(tbHomingSpeedUS);
+  }
+}
+
+// ============================
+// === LINEAR AXIS MOVE =======
+// ============================
+void moveLinearAxis(float mm) {
+  long steps = mm * stepsPerMM;
+  digitalWrite(TB_DIR_PIN, tbWorkingDir);
+  for (long i = 0; i < steps; i++) {
+    digitalWrite(TB_STEP_PIN, HIGH); delayMicroseconds(tbMoveSpeedUS);
+    digitalWrite(TB_STEP_PIN, LOW); delayMicroseconds(tbMoveSpeedUS);
+  }
+  Serial.print("Linear axis moved ");
+  Serial.print(mm);
+  Serial.println(" mm forward");
+}
+
+void moveLinearAxisShort(float mm) {
+  long steps = mm * stepsPerMM;
+  digitalWrite(TB_DIR_PIN, tbWorkingDir);
+  for (long i = 0; i < steps; i++) {
+    digitalWrite(TB_STEP_PIN, HIGH); delayMicroseconds(tbMoveSpeedUS);
+    digitalWrite(TB_STEP_PIN, LOW); delayMicroseconds(tbMoveSpeedUS);
+  }
+  Serial.print("Linear axis moved ");
+  Serial.print(mm);
+  Serial.println(" mm");
+}
+
+void moveLinearAxisBackwards(float mm) {
+  long steps = mm * stepsPerMM;
+  digitalWrite(TB_DIR_PIN, tbHomingDir); // Use homing direction for backwards movement
+  for (long i = 0; i < steps; i++) {
+    digitalWrite(TB_STEP_PIN, HIGH); delayMicroseconds(tbMoveSpeedUS);
+    digitalWrite(TB_STEP_PIN, LOW); delayMicroseconds(tbMoveSpeedUS);
+  }
+  Serial.print("Linear axis moved ");
+  Serial.print(mm);
+  Serial.println(" mm backwards");
+}
+
+// ====================================
+// === TB6600 GRIPPER - CLOSE ========
+// ====================================
+void closeStepperGripper() {
+  Serial.println("Closing TB6600 gripper...");
+  digitalWrite(TB2_DIR_PIN, gripperCloseDirection);
+
+  for (int i = 0; i < tb2StepsToClose; i++) {
+    digitalWrite(TB2_STEP_PIN, HIGH); 
+    delayMicroseconds(tb2PulseWidthUS);
+    digitalWrite(TB2_STEP_PIN, LOW); 
+    delayMicroseconds(tb2StepDelayUS);
+    
+    if (i % 20 == 0) {
+      Serial.print("Step: "); Serial.println(i);
+    }
+  }
+  Serial.println("TB6600 gripper closed.");
+}
+
+// ====================================
+// === TB6600 GRIPPER - OPEN =========
+// ====================================
+void openStepperGripper() {
+  Serial.println("Opening TB6600 gripper...");
+  digitalWrite(TB2_DIR_PIN, gripperOpenDirection);
+
+  int stepCount = 0;
+  while (true) {
+    if (digitalRead(TB2_LIMIT_PIN) == LOW) {
+      delay(20);  // debounce delay
+      if (digitalRead(TB2_LIMIT_PIN) == LOW) {
+        Serial.println("Gripper open limit reached.");
+        break;
+      }
+    }
+
+    digitalWrite(TB2_STEP_PIN, HIGH); 
+    delayMicroseconds(tb2PulseWidthUS);
+    digitalWrite(TB2_STEP_PIN, LOW); 
+    delayMicroseconds(tb2StepDelayUS);
+
+    stepCount++;
+    if (stepCount > 2000) { // Increased limit due to microstepping
+      Serial.println("Warning: Open limit not reached after 2000 steps!");
+      break;
+    }
+    if (stepCount % 50 == 0) {
+      Serial.print("Opening step: "); Serial.println(stepCount);
+    }
+  }
+
+  Serial.print("TB6600 gripper opened after ");
+  Serial.print(stepCount);
+  Serial.println(" steps");
+}
+
+// ====================================
+// === SERVO GRIPPER - OPEN ===========
+// ====================================
+void openServoGripper() {
+  Serial.println("Opening servo gripper...");
+
+  // If already at limit switch, no need to move
+  if (digitalRead(SERVO_LIMIT_PIN) == LOW) {
+    Serial.println("✓ Servo gripper is already open (limit switch pressed)");
+    return;
+  }
+
+  Serial.println("Step 1: Resetting to start position...");
+  int servoPosition = servoStartAngle;
+  servoGripper.write(servoPosition);
+  delay(500);
+
+  // --- Step 2: Always move a minimum angle before checking limit switch ---
+  Serial.print("Step 2: Moving minimum ");
+  Serial.print(servoMinOpenDegrees);
+  Serial.println(" degrees before checking limit switch...");
+
+  for (int i = 0; i < servoMinOpenDegrees; i++) {
+    servoPosition--;
+    servoPosition = constrain(servoPosition, 0, 180);
+    servoGripper.write(servoPosition);
+    delay(servoStepDelay);
+  }
+
+  // --- Step 3: Continue until limit switch is pressed ---
+  Serial.println("Step 3: Now looking for limit switch...");
+
+  int stepCount = 0;
+  while (digitalRead(SERVO_LIMIT_PIN) == HIGH) {
+    servoPosition--;
+    servoPosition = constrain(servoPosition, 0, 180);
+
+    servoGripper.write(servoPosition);
+    delay(servoStepDelay);
+    stepCount++;
+
+    if (stepCount % 20 == 0) {
+      Serial.print("Opening... Position: ");
+      Serial.println(servoPosition);
+    }
+
+    if (servoPosition <= 0 || stepCount > 200) {
+      Serial.println("Warning: Reached mechanical limit without hitting limit switch!");
+      break;
+    }
+  }
+
+  // Final check
+  if (digitalRead(SERVO_LIMIT_PIN) == LOW) {
+    delay(20);
+    if (digitalRead(SERVO_LIMIT_PIN) == LOW) {
+      Serial.print("✓ Servo gripper opened successfully! Final position: ");
+      Serial.println(servoPosition);
+    }
+  }
+}
+
+// ====================================
+// === SERVO GRIPPER - CLOSE ==========
+// ====================================
+void closeServoGripper() {
+  Serial.println("Closing servo gripper...");
+  
+  // First, reset servo to a known position (middle)
+  servoGripper.write(90);
+  delay(500); // Give time for servo to reach position
+  
+  // Step 1: Always home to limit switch first
+  Serial.println("Step 1: Homing servo to limit switch...");
+  int servoPosition = 90; // Start from middle
+  int homeSteps = 0;
+  
+  // Skip homing if already at limit switch
+  if (digitalRead(SERVO_LIMIT_PIN) == LOW) {
+    Serial.println("Already at limit switch, skipping homing");
+  } else {
+    while (digitalRead(SERVO_LIMIT_PIN) == HIGH) {
+      servoPosition--; // Move one step counter-clockwise
+      servoPosition = constrain(servoPosition, 0, 180);
+      
+      servoGripper.write(servoPosition);
+      delay(servoStepDelay);
+      homeSteps++;
+      
+      if (homeSteps % 20 == 0) {
+        Serial.print("Homing... Position: ");
+        Serial.print(servoPosition);
+        Serial.print(", Steps: ");
+        Serial.println(homeSteps);
+      }
+      
+      if (servoPosition <= 0 || homeSteps > 200) {
+        Serial.println("Warning: Reached limit during homing!");
+        break;
+      }
+    }
+    
+    // Verify homing completed
+    if (digitalRead(SERVO_LIMIT_PIN) == LOW) {
+      delay(20);  // Debounce delay
+      if (digitalRead(SERVO_LIMIT_PIN) == LOW) {
+        Serial.print("✓ Homing complete at position: ");
+        Serial.print(servoPosition);
+        Serial.print(", Home steps: ");
+        Serial.println(homeSteps);
+      }
+    }
+  }
+  
+  // Step 2: Move the specified steps to close
+  Serial.print("Step 2: Moving ");
+  Serial.print(servoCloseRotationDegrees);
+  Serial.println(" steps to close gripper...");
+  
+  // Start from current position and move forward
+  for (int step = 0; step < servoCloseRotationDegrees; step++) {
+    servoPosition++; // Move one step clockwise
+    servoPosition = constrain(servoPosition, 0, 180);
+    
+    servoGripper.write(servoPosition);
+    delay(servoStepDelay);
+    
+    // Print progress every 30 steps
+    if ((step + 1) % 30 == 0) {
+      Serial.print("Closing progress: ");
+      Serial.print(step + 1);
+      Serial.print("/");
+      Serial.print(servoCloseRotationDegrees);
+      Serial.print(" steps, Position: ");
+      Serial.println(servoPosition);
+    }
+  }
+  
+  Serial.print("✓ Servo gripper closed! Final position: ");
+  Serial.println(servoPosition);
+}

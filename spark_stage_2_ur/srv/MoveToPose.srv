@@ -1,0 +1,13 @@
+# Request: Target pose with position and orientation
+float64 x           # Target X position (meters)
+float64 y           # Target Y position (meters)
+float64 z           # Target Z position (meters)
+float64 quat_x      # Target orientation quaternion X
+float64 quat_y      # Target orientation quaternion Y
+float64 quat_z      # Target orientation quaternion Z
+float64 quat_w      # Target orientation quaternion W
+bool use_planning   # true = obstacle avoidance, false = linear Cartesian path
+---
+# Response
+bool success        # Whether motion planning/execution succeeded
+string message      # Status or error message
