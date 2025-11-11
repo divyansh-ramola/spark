@@ -29,6 +29,8 @@ find_package(ur_client_library REQUIRED)
 rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveToPose.srv"
   "srv/MoveLinearRPY.srv"
+  "srv/MoveLinearQuat.srv"
+  "srv/ArduinoCommand.srv"
   DEPENDENCIES geometry_msgs
 )
 
@@ -58,54 +60,38 @@ ament_target_dependencies(move_to_pose_node
   tf2
   tf2_ros
   tf2_geometry_msgs
+  ur_msgs
 )
 
 # Link the custom service interface to the executable
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
 target_link_libraries(move_to_pose_node "${cpp_typesupport_target}")
 
-# Joint state remapper to fix joint ordering
-add_executable(joint_state_remapper src/joint_state_remapper.cpp)
-ament_target_dependencies(joint_state_remapper 
-  rclcpp 
-  sensor_msgs
-)
 
-# UR Pose Planner node with class-based structure
-add_executable(ur_pose_planner_node src/ur_pose_planner_node.cpp)
-ament_target_dependencies(ur_pose_planner_node 
+
+# Arduino Motor Controller node
+add_executable(arduino_controller_node src/Arduino_controller_node.cpp)
+ament_target_dependencies(arduino_controller_node 
   rclcpp 
   std_srvs
   std_msgs
-  sensor_msgs
-  geometry_msgs
-  moveit_ros_planning_interface
-  moveit_msgs
-  shape_msgs
-  tf2_ros
-  tf2_geometry_msgs
 )
 
-# Bin Pick node - planning only (execution commented out)
-add_executable(bin_pick_node src/bin_pick_node.cpp)
-ament_target_dependencies(bin_pick_node 
-  rclcpp 
-  std_srvs
-  std_msgs
-  sensor_msgs
-  geometry_msgs
-  moveit_ros_planning_interface
-  moveit_msgs
-  shape_msgs
-  tf2_ros
-  tf2_geometry_msgs
-)
+# Link the custom service interface to the Arduino controller
+target_link_libraries(arduino_controller_node "${cpp_typesupport_target}")
+
+# Link serial library
+target_link_libraries(arduino_controller_node serial)
 
 install(TARGETS
   move_to_pose_node
-  joint_state_remapper
-  ur_pose_planner_node
-  bin_pick_node
+  arduino_controller_node
+  DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install Python scripts
+install(PROGRAMS
+  src/arduino_service_client.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

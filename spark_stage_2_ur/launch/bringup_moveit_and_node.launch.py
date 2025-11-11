@@ -122,6 +122,7 @@ def generate_launch_description():
         executable=  "move_to_pose_node",  # bin_pick_node
         name=    "move_to_pose_node",  # bin_pick_node
         output="screen",
+        arguments=["--ros-args", "--log-level", "move_group_interface:=warn"],
         parameters=[
             robot_description,
             robot_description_semantic,

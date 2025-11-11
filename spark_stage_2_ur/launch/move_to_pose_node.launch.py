@@ -80,6 +80,7 @@ def launch_setup(context, *args, **kwargs):
         executable="move_to_pose_node",
         name="move_to_pose_node",
         output="screen",
+        arguments=["--ros-args", "--log-level", "move_group_interface:=warn"],
         parameters=[
             robot_description,
             robot_description_semantic,

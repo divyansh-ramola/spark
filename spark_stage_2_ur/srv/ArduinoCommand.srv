@@ -1,0 +1,6 @@
+# Request: Single character command to send to Arduino
+string command      # Command character (h=home, f=find_metal, m=move_m0, n=move_m1, p=move_m0_home, q=move_m1_home)
+---
+# Response
+bool success        # Whether command execution succeeded
+string message      # Status or error message
