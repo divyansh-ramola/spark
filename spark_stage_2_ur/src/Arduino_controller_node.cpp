@@ -19,7 +19,7 @@ public:
     ArduinoMotorController() : Node("arduino_motor_controller")
     {
         // Declare parameters
-        this->declare_parameter("serial_port", "/dev/ttyACM1");
+        this->declare_parameter("serial_port", "/dev/ttyACM0");
         this->declare_parameter("baud_rate", 115200);
         this->declare_parameter("timeout_ms", 30000);
 
@@ -231,6 +231,14 @@ private:
                 expected_complete = "MOVE_M1_HOME_COMPLETE";
                 expected_failed = "MOVE_M1_HOME_FAILED";
                 break;
+            case 'a':
+                expected_complete = "MOVE_M1_FORWARD_COMPLETE";
+                expected_failed = "MOVE_M1_FORWARD_FAILED";
+                break;
+            case 'b':
+                expected_complete = "MOVE_M1_BACKWARD_COMPLETE";
+                expected_failed = "MOVE_M1_BACKWARD_FAILED";
+                break;
             default:
                 RCLCPP_ERROR(this->get_logger(), "Unknown command: %c", command);
                 return false;
@@ -299,7 +307,7 @@ private:
         // Validate and extract command character
         if (request->command.empty()) {
             response->success = false;
-            response->message = "Command string is empty. Valid commands are: h, f, m, n, p, q";
+            response->message = "Command string is empty. Valid commands are: h, f, m, n, p, q, a, b";
             RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
             return;
         }
@@ -339,10 +347,20 @@ private:
                 command_name = "Move M1 Towards Home";
                 command = 'q';
                 break;
+            case 'a':
+            case 'A':
+                command_name = "Move M1 Forward";
+                command = 'a';
+                break;
+            case 'b':
+            case 'B':
+                command_name = "Move M1 Backward";
+                command = 'b';
+                break;
             default:
                 response->success = false;
                 response->message = "Invalid command: '" + std::string(1, command) + 
-                                   "'. Valid commands are: h, f, m, n, p, q";
+                                   "'. Valid commands are: h, f, m, n, p, q, a, b";
                 RCLCPP_ERROR(this->get_logger(), "%s", response->message.c_str());
                 return;
         }

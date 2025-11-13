@@ -3,7 +3,7 @@
 
   This code waits for serial commands and sends acknowledgments:
   - 'h': Homes both motors in sequence
-  - 'f': Moves Motor 1 until metal detected (pin 30 HIGH)
+  - 'f': Moves Motor 0 until metal detected (pin 30 HIGH)
   - 'm': Moves Motor 0 away from home
   - 'n': Moves Motor 1 away from home
   - 'p': Moves Motor 0 towards home (fixed steps defined in config)
@@ -31,9 +31,9 @@ long maxHomingSteps_0 = 200000;
 int stepDelay_1 = 800;
 long maxHomingSteps_1 = 200000;
 
-// --- SENSOR (MOTOR 1) ---
+// --- SENSOR (for Motor 0) ---
 #define SENSOR_PIN_1 30
-#define FIND_DIR_1 LOW
+#define FIND_DIR_0 LOW
 #define EXTRA_STEPS_AFTER_FIND 100
 
 // --- MOVE AWAY CONFIG ---
@@ -164,26 +164,28 @@ bool homeMotor1() {
   return true;
 }
 
-bool findMetalMotor1() {
-  Serial.println("=== Finding Metal (Motor 1) ===");
+// =========================================================================
+// 🆕 Modified function — Find Metal using Motor 0
+bool findMetalMotor0() {
+  Serial.println("=== Finding Metal (Motor 0) ===");
   long stepCount = 0;
-  motor1Stopped = false;
+  motor0Stopped = false;
 
   if (digitalRead(SENSOR_PIN_1) == HIGH) {
     Serial.println("WARNING: Metal already detected (Pin 30 is HIGH).");
-    motor1Stopped = true;
+    motor0Stopped = true;
     return true;
   }
 
-  Serial.println("M1 Moving to find metal (looking for HIGH on pin 30)...");
-  digitalWrite(DIR_PIN_1, FIND_DIR_1);
+  Serial.println("M0 Moving to find metal (looking for HIGH on pin 30)...");
+  digitalWrite(DIR_PIN_0, FIND_DIR_0);
 
-  while (stepCount < maxHomingSteps_1) {
-    takeOneStep1();
+  while (stepCount < maxHomingSteps_0) {
+    takeOneStep0();
     stepCount++;
 
     if (digitalRead(SENSOR_PIN_1) == HIGH) {
-      Serial.println("M1 Metal Found (HIGH).");
+      Serial.println("M0 Metal Found (HIGH).");
       Serial.print("Moving ");
       Serial.print(EXTRA_STEPS_AFTER_FIND);
       Serial.println(" extra steps...");
@@ -191,21 +193,22 @@ bool findMetalMotor1() {
       delay(1000);
 
       for (long i = 0; i < EXTRA_STEPS_AFTER_FIND; i++) {
-        takeOneStep1();
+        takeOneStep0();
       }
       Serial.println("Extra steps complete. Stopping.");
-      motor1Stopped = true;
+      motor0Stopped = true;
       break;
     }
   }
 
-  if (!motor1Stopped) {
-    Serial.println("!!! M1 FIND METAL FAILED (Max steps) !!!");
-    motor1Stopped = true;
+  if (!motor0Stopped) {
+    Serial.println("!!! M0 FIND METAL FAILED (Max steps) !!!");
+    motor0Stopped = true;
     return false;
   }
   return true;
 }
+// =========================================================================
 
 bool moveAway0() {
   Serial.println("=== Moving Motor 0 Away ===");
@@ -248,7 +251,6 @@ bool moveTowardsHome0() {
 
   for (long i = 0; i < MOVE_TOWARDS_HOME_STEPS_0; i++) {
     takeOneStep0();
-    // Optional: check if limit switch is hit during movement
     if (digitalRead(LIMIT_SWITCH_PIN_0) == LOW) {
       Serial.println("M0 Limit switch hit during movement. Stopping.");
       break;
@@ -269,7 +271,6 @@ bool moveTowardsHome1() {
 
   for (long i = 0; i < MOVE_TOWARDS_HOME_STEPS_1; i++) {
     takeOneStep1();
-    // Optional: check if limit switch is hit during movement
     if (digitalRead(LIMIT_SWITCH_PIN_1) == LOW) {
       Serial.println("M1 Limit switch hit during movement. Stopping.");
       break;
@@ -284,7 +285,7 @@ bool moveTowardsHome1() {
 // =========================================================================
 void setup() {
   Serial.begin(115200);
-  Serial.println("READY"); // Initial ready signal
+  Serial.println("READY");
 
   digitalWrite(STEP_PIN_0, LOW);
   digitalWrite(DIR_PIN_0, LOW);
@@ -302,7 +303,7 @@ void setup() {
   pinMode(SENSOR_PIN_1, INPUT);
 
   Serial.println("Setup complete.");
-  Serial.println("Commands: h=home, f=find metal, m=move M0 away, n=move M1 away");
+  Serial.println("Commands: h=home, f=find metal (M0), m=move M0 away, n=move M1 away");
   Serial.println("          p=M0 towards home, q=M1 towards home");
 }
 
@@ -319,61 +320,48 @@ void loop() {
       bool m0 = homeMotor0();
       bool m1 = homeMotor1();
       success = m0 && m1;
-      if (success) {
-        Serial.println("DONE:h");
-      } else {
-        Serial.println("ERROR:h");
-      }
+      if (success) Serial.println("DONE:h");
+      else Serial.println("ERROR:h");
     }
+
     else if (command == 'f' || command == 'F') {
       Serial.println("ACK:f");
-      motor1Stopped = false;
-      success = findMetalMotor1();
-      if (success) {
-        Serial.println("DONE:f");
-      } else {
-        Serial.println("ERROR:f");
-      }
+      motor0Stopped = false;
+      success = findMetalMotor0();   // 👈 now uses Motor 0
+      if (success) Serial.println("DONE:f");
+      else Serial.println("ERROR:f");
     }
+
     else if (command == 'm' || command == 'M') {
       Serial.println("ACK:m");
       motor0Stopped = false;
       success = moveAway0();
-      if (success) {
-        Serial.println("DONE:m");
-      } else {
-        Serial.println("ERROR:m");
-      }
+      if (success) Serial.println("DONE:m");
+      else Serial.println("ERROR:m");
     }
+
     else if (command == 'n' || command == 'N') {
       Serial.println("ACK:n");
       motor1Stopped = false;
       success = moveAway1();
-      if (success) {
-        Serial.println("DONE:n");
-      } else {
-        Serial.println("ERROR:n");
-      }
+      if (success) Serial.println("DONE:n");
+      else Serial.println("ERROR:n");
     }
+
     else if (command == 'p' || command == 'P') {
       Serial.println("ACK:p");
       motor0Stopped = false;
       success = moveTowardsHome0();
-      if (success) {
-        Serial.println("DONE:p");
-      } else {
-        Serial.println("ERROR:p");
-      }
+      if (success) Serial.println("DONE:p");
+      else Serial.println("ERROR:p");
     }
+
     else if (command == 'q' || command == 'Q') {
       Serial.println("ACK:q");
       motor1Stopped = false;
       success = moveTowardsHome1();
-      if (success) {
-        Serial.println("DONE:q");
-      } else {
-        Serial.println("ERROR:q");
-      }
+      if (success) Serial.println("DONE:q");
+      else Serial.println("ERROR:q");
     }
   }
 }

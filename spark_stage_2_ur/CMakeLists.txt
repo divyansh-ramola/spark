@@ -24,6 +24,8 @@ find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED)
 find_package(ur_msgs REQUIRED)
 find_package(ur_client_library REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -31,6 +33,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "srv/MoveLinearRPY.srv"
   "srv/MoveLinearQuat.srv"
   "srv/ArduinoCommand.srv"
+  "srv/MoveToJoints.srv"
   DEPENDENCIES geometry_msgs
 )
 
@@ -48,6 +51,13 @@ endif()
 
 # small test executable for quick build checks
 add_executable(move_to_pose_node src/move_to_pose_node.cpp)
+
+# Add include directories for headers
+target_include_directories(move_to_pose_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+
 ament_target_dependencies(move_to_pose_node 
   rclcpp 
   std_srvs
@@ -61,7 +71,11 @@ ament_target_dependencies(move_to_pose_node
   tf2_ros
   tf2_geometry_msgs
   ur_msgs
+  ament_index_cpp
 )
+
+# Link libraries
+target_link_libraries(move_to_pose_node yaml-cpp)
 
 # Link the custom service interface to the executable
 rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
@@ -83,15 +97,27 @@ target_link_libraries(arduino_controller_node "${cpp_typesupport_target}")
 # Link serial library
 target_link_libraries(arduino_controller_node serial)
 
+# TF Pose Saver node
+add_executable(tf_pose_saver_node src/tf_pose_saver_node.cpp)
+ament_target_dependencies(tf_pose_saver_node 
+  rclcpp 
+  std_srvs
+  tf2
+  tf2_ros
+  geometry_msgs
+)
+target_link_libraries(tf_pose_saver_node yaml-cpp)
+
 install(TARGETS
   move_to_pose_node
   arduino_controller_node
+  tf_pose_saver_node
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # Install Python scripts
 install(PROGRAMS
-  src/arduino_service_client.py
+  src/connector_pose_gui.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

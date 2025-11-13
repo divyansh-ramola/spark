@@ -4,6 +4,7 @@
 #include "spark_stage_2_ur/srv/move_linear_rpy.hpp"
 #include "spark_stage_2_ur/srv/move_linear_quat.hpp"
 #include "spark_stage_2_ur/srv/arduino_command.hpp"
+#include "spark_stage_2_ur/srv/move_to_joints.hpp"
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -14,6 +15,10 @@
 #include <moveit_msgs/msg/robot_trajectory.hpp>
 #include <shape_msgs/msg/solid_primitive.hpp>
 #include <sensor_msgs/msg/joint_state.hpp>
+#include <trajectory_msgs/msg/joint_trajectory.hpp>
+#include <trajectory_msgs/msg/joint_trajectory_point.hpp>
+#include <control_msgs/action/follow_joint_trajectory.hpp>
+#include <rclcpp_action/rclcpp_action.hpp>
 #include <moveit/trajectory_processing/iterative_time_parameterization.h>
 #include <moveit/robot_trajectory/robot_trajectory.h>
 #include <tf2_ros/buffer.h>
@@ -35,6 +40,8 @@
 #include <variant>
 #include <future>
 #include <atomic>
+#include "spark_stage_2_ur/connector_position.hpp"
+#include <geometry_msgs/msg/pose.hpp>
 
 class MoveToPoseNode : public rclcpp::Node
 {
@@ -42,12 +49,23 @@ public:
   explicit MoveToPoseNode()
   : Node("move_to_pose_node", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true)),
     move_group(std::shared_ptr<rclcpp::Node>(this, [](rclcpp::Node*){}), "ur_manipulator"),
-    velocity_scaling_(1.0),
-    acceleration_scaling_(1.0),
+    velocity_scaling_(0.1),
+    acceleration_scaling_(0.1),
     tf_buffer_(std::make_shared<tf2_ros::Buffer>(this->get_clock())),
-    tf_listener_(std::make_shared<tf2_ros::TransformListener>(*tf_buffer_))
+    tf_listener_(std::make_shared<tf2_ros::TransformListener>(*tf_buffer_)),
+    connector_manager_(this->get_logger())  // Automatically loads YAML in constructor
   {
     RCLCPP_INFO(this->get_logger(), "Move to Pose Node has been started.");
+
+    // Declare and get velocity and acceleration scaling parameters
+    this->declare_parameter("velocity_scaling", 0.1);
+    this->declare_parameter("acceleration_scaling", 0.1);
+    
+    velocity_scaling_ = this->get_parameter("velocity_scaling").as_double();
+    acceleration_scaling_ = this->get_parameter("acceleration_scaling").as_double();
+    
+    RCLCPP_INFO(this->get_logger(), "Velocity scaling: %.2f", velocity_scaling_);
+    RCLCPP_INFO(this->get_logger(), "Acceleration scaling: %.2f", acceleration_scaling_);
 
     main_timer_ = create_wall_timer(std::chrono::milliseconds(100), std::bind(&MoveToPoseNode::main_timer_callback, this));
     move_group.setStartStateToCurrentState();
@@ -81,6 +99,13 @@ public:
       rmw_qos_profile_services_default,
       group_services_);
 
+    // Move to joint angles
+    joints_service = create_service<spark_stage_2_ur::srv::MoveToJoints>(
+      "move_to_joints",
+      std::bind(&MoveToPoseNode::move_to_joints_callback, this, std::placeholders::_1, std::placeholders::_2),
+      rmw_qos_profile_services_default,
+      group_services_);
+
     gripper_client_ = create_client<ur_msgs::srv::SetIO>("/io_and_status_controller/set_io");
     while (!gripper_client_->wait_for_service(std::chrono::seconds(2))) {
       RCLCPP_INFO(this->get_logger(), "Waiting for /io_and_status_controller/set_io service to be available...");
@@ -90,6 +115,16 @@ public:
     // while (!arduino_client_->wait_for_service(std::chrono::seconds(2))) {
     //   RCLCPP_INFO(this->get_logger(), "Waiting for arduino/send_command service to be available...");
     // }
+
+    // Create joint trajectory action client for direct control
+    joint_trajectory_action_client_ = rclcpp_action::create_client<FollowJointTrajectory>(
+      this, "/scaled_joint_trajectory_controller/follow_joint_trajectory");
+    RCLCPP_INFO(this->get_logger(), "Joint trajectory action client created");
+    
+    // Create simple trajectory publisher as backup
+    joint_trajectory_pub_ = create_publisher<trajectory_msgs::msg::JointTrajectory>(
+      "/scaled_joint_trajectory_controller/joint_trajectory", 10);
+    RCLCPP_INFO(this->get_logger(), "Joint trajectory publisher created");
 
       {
         rclcpp::SubscriptionOptions sub_opts;
@@ -131,11 +166,19 @@ private:
   rclcpp::Service<spark_stage_2_ur::srv::MoveToPose>::SharedPtr pose_service;
   rclcpp::Service<spark_stage_2_ur::srv::MoveLinearRPY>::SharedPtr linear_rpy_service;
   rclcpp::Service<spark_stage_2_ur::srv::MoveLinearQuat>::SharedPtr linear_quat_service;
+  rclcpp::Service<spark_stage_2_ur::srv::MoveToJoints>::SharedPtr joints_service;
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
 
   // Separate callback groups so sensor callbacks can run in parallel with services
   rclcpp::CallbackGroup::SharedPtr group_sensors_;
   rclcpp::CallbackGroup::SharedPtr group_services_;
+
+  // Joint trajectory action client for direct control
+  using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
+  rclcpp_action::Client<FollowJointTrajectory>::SharedPtr joint_trajectory_action_client_;
+  
+  // Simple trajectory publisher as backup
+  rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr joint_trajectory_pub_;
 
   // Joint state tracking (kept for backup/debugging)
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr joint_state_sub_;
@@ -165,6 +208,9 @@ private:
   int vacuum_update_count_ = 0;
   bool vacuum_initialized_ = false;
   std::atomic<bool> vacuum_active_{false};
+
+  // Connector position manager
+  connector_position::ConnectorPositionManager connector_manager_;
 
 
   void vacuum_callback(const ur_msgs::msg::IOStates::SharedPtr msg)
@@ -196,8 +242,8 @@ private:
     
 
     if (over_threshold && !vacuum_active_.load()) {
-      RCLCPP_WARN(this->get_logger(), "WIRE DETECTED! voltage: %.3f V, drop: %.3f V (threshold: %.3f V)", 
-                  analog, voltage_drop, threshold);
+      //RCLCPP_WARN(this->get_logger(), "WIRE DETECTED! voltage: %.3f V, drop: %.3f V (threshold: %.3f V)", 
+                  // analog, voltage_drop, threshold);
       // Stop current motion immediately to reduce latency
       // try { move_group.stop(); } catch (const std::exception &e) {
       //   RCLCPP_WARN(this->get_logger(), "move_group.stop() threw: %s", e.what());
@@ -229,7 +275,7 @@ private:
     if (!wrench_initialized_) {
       return;
     } 
-    const bool over_threshold = ((std::abs(force.z) - wrench_initial_) > 80.0);
+    const bool over_threshold = ((std::abs(force.z) - wrench_initial_) > 50.0);
 
     if (over_threshold && !wrench_active_.load()) {
       RCLCPP_WARN(this->get_logger(), "High force detected on end-effector: %.2f N ", force.z);
@@ -290,7 +336,7 @@ private:
       double relative_y_move = y_offset_ - previous_y_offset;
       
       if (std::fabs(relative_y_move) > 1e-9) {
-        auto [ok_offset, msg_offset] = joglinear(0.0, relative_y_move, 0.0);
+        auto [ok_offset, msg_offset] = joglinear(relative_y_move, relative_y_move, 0.0);
         {auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, -0.010);}
         if (!ok_offset) {
           RCLCPP_WARN(this->get_logger(), "Offset move failed at try %d: %s", tries + 1, msg_offset.c_str());
@@ -336,14 +382,14 @@ private:
       }
 
       // After attempt: lift a bit to clear space before next try
-      auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.020);
+      auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
       if (!ok_lift) {
         RCLCPP_WARN(this->get_logger(), "Attempt %d: lift failed: %s", tries + 1, msg_lift.c_str());
       }
 
       if (detected) {
         // Stop outer loop on successful trigger
-        joglinear(0.0, 0.0, 0.223);
+        
         break;
       }
 
@@ -356,7 +402,7 @@ private:
       }
 
       {
-        bool grip_ok = ngripper(false,0);
+        (void)ngripper(false,0);
         
       }
     }  // end for loop
@@ -367,121 +413,232 @@ private:
   void move_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                      std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
-    RCLCPP_INFO(get_logger(), "Starting descent attempts; stop when wrench or vacuum triggers, else try new Y offset");
+   
 
-    movelinear(0.247, -0.632, 0.569 ,-0.699, 0.715, 0.014, 0.010);
-    {
-      bool grip_ok = ngripper(false,0);
-      if(!grip_ok){
-        RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
-        response->success = false;
-        response->message = "Failed to open gripper DO0";
-        return;
-      }
+    movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
+    // send_arduino_command('h'); // command to arduino to move the pick jig in place
+    //  send_arduino_command('m');
+    //  {
+    //   bool grip_ok = ngripper(false,0);
+    //   if(!grip_ok){
+    //     RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
+    //     response->success = false;
+    //     response->message = "Failed to open gripper DO0";
+    //     return;
+    //   }
+    // }
       
-    }
+   
 
-    {
-      bool grip_ok = ngripper(false,1);
-    }
-    {
-      bool grip_ok = ngripper(false,2);
-    }
+    // {
+    //   bool grip_ok = ngripper(false,1);
+    // }
+    // {
+    //   bool grip_ok = ngripper(false,2);
+    //   (void)egripper(false);
+    // }
     
-    // movelinear(0.247, -0.631, 0.312, -0.699, 0.715, 0.014, 0.010);
-
+    // movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
     // // Configure attempts across Y offsets (stop only when vacuum becomes active)
     // const int no_of_tries = 7;
     // const int kMaxSteps = 200;  // safety stop per attempt
+   
     
     // bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
 
 
-    // if(!detected){
-    //   RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
+    // if(detected && vacuum_active_.load()){
+    //   auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
+    //   joglinear(0.015, 0, 0);
+    //   joglinear(-0.015, 0, 0); //shake wire a bit
+    //   (void)ngripper(true,0);
+    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
+
+    // }else{
+    //   movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
+    //   bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
+    //   if(detected && vacuum_active_.load()){
+    //     movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
+    //     auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
+    //     (void)ngripper(true,0);
+    //     movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
+    //   }else{
     //     response->success = false;
-    //     response->message = "Failed to open gripper DO0";
-    //     return;
-
-    // }
-
-    {
-     // bool grip_ok = ngripper(true,0);
-    };
-
-
-    // movelinear(0.247, -0.632, 0.779 ,-0.699, 0.715, 0.014, 0.010); // top of the bin 
-    // movelinear(0.729, -0.050, 0.706 ,0.997, 0.027, 0.016, -0.069); //above gripper1
-
-
-    // movelinear(0.729, -0.050, 0.580 ,0.997, 0.027, 0.016, -0.069); //gripper1
-     movelinear(0.736, -0.038, 0.706 ,0.060, 0.996, 0.068, 0.018); //atthetip
-     movelinear(0.736, -0.038, 0.584 ,0.060, 0.996, 0.068, 0.018); //atthetip
-    // {
-    //   bool grip_ok = ngripper(true,1);
-    // }
-
-    // {
-    //   bool grip_ok = ngripper(false,0);
-    // }
-    // movelinear(0.703, -0.012, 0.581 ,0.029, 0.998, 0.054, 0.018); //above gripper1
-
-
-    // {
-    //   bool grip_ok = ngripper(true,1);
-    // }
-
-    // {
-    //   bool success = send_arduino_command('f');
-    //   if (!success) {
-    //     RCLCPP_ERROR(this->get_logger(), "Failed to send 'f' command to Arduino");
-    //     response->success = false;
-    //     response->message = "Failed to send 'f' command to Arduino";
+    //     response->message = "Wire detection failed";
     //     return;
     //   }
     // }
-
-    // {
-    //   bool grip_ok = ngripper(true,2);
-    // }
-
-    // {
-    //   bool success = send_arduino_command('f');
-    //   if (!success) {
-    //     RCLCPP_ERROR(this->get_logger(), "Failed to send 'f' command to Arduino");
-    //     response->success = false;
-    //     response->message = "Failed to send 'f' command to Arduino";
-    //     return;
-    //   }
-    // }
-
-    // { egripper(false);
-    //   joglinear(0.0, 0.0, 0.020);
-    //   egripper(true);
-    //   joglinear(0.0, 0.0, -0.020);
-    //   egripper(false);   
-    // }
-
-
-
 
    
-    // if (detected) {
-    //   response->success = true;
-    //   response->message = "Vacuum (wire) detected during descent";
-    // } else {
-    //   response->success = false;
-    //   response->message = "All attempts completed without vacuum trigger";
-    //   joglinear(0.0, 0.0, 0.253);
-    // }
+
     
-    // return;
+    // // movelinear(0.653, -0.339, 0.707,0.997, 0.059, 0.011, -0.057); /// top 
+   
+    // // movelinear(0.653, -0.339, 0.582,0.997, 0.059, 0.011, -0.057); /// at ht ejig
+    // // movelinear(0.672, -0.319, 0.585, 0.997, 0.059, 0.011, -0.057); /// at ht ejig
+
+
+
+    
+   
+
+    // // {
+    // //   // command to arduino to move the pick jig in place
+    // //   send_arduino_command('p');
+    // //   bool grip_ok = ngripper(true,1);
+    // // } 
+    // // {
+    // //   bool grip_ok = ngripper(false,0);
+    // //   rclcpp::sleep_for(std::chrono::milliseconds(1000));
+    // // }
+    // // movelinear(0.672, -0.319, 0.800, 0.997, 0.059, 0.011, -0.057); /// at ht ejig  
+    
+    // // {
+    // //   send_arduino_command('a'); // command to arduino to push the connector in place
+    // //   send_arduino_command('f'); // command to arduino to push the connector in place
+    // //   send_arduino_command('b'); // command to arduino to move the pick jig in place   
+    // //   (void)ngripper(true,2); 
+    // //   (void)ngripper(false,1);
+    // //   send_arduino_command('n'); // command to arduino to move the pick jig in place 
+    // // }
+
+    
+    // // {
+    // //   // (void)egripper(true);
+    // //   // rclcpp::sleep_for(std::chrono::milliseconds(1000));
+    // //   // (void)ngripper(false,2);
+    // //   // rclcpp::sleep_for(std::chrono::milliseconds(1000));
+    // // }
+      movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
+
+      movelinear(0.664, -0.310, 0.506 ,0.720, -0.016, -0.514, 0.466); //at the tip 
+      movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
+
+
+
+  
+
+      
+
+
+
+
+
+
+
+
+
+
+
+
+    // joglinear(0.0, 0.0, 0.200);
+
+
+    
+    //   send_arduino_command('p'); // command to arduino to move the pick jig in place
+    //   bool grip_ok = ngripper(true,1);
+    // } 
+    // movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the jig 
+    // send_arduino_command('f'); // command to arduino to push the connector in place 
+    // movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the  pick jig
+
+
+    // {
+    //   bool grip_ok = ngripper(true,1);
+    //   send_arduino_command('q'); // command to arduino to move the pick jig in place
+    // } 
+    // {
+    //   bool grip_ok = egripper(false);
+    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// at the pick jig
+    //   bool grip_ok = egripper(true);
+    //   bool grip_ok2 = ngripper(false,0);
+    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the pick jig
+    // }
+    // {
+    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the  connector
+    //   row  int row = 1;
+    //   int col = 8;
+    //   bool insertion = insertion_logic(row, col);
+    //   bool grip_ok2 = egripper(false);
+    //   joglinear(0.0, 0.0, 0.050);
+    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the pick jig
+    // }
+
+
+
+
+    response->success = true;
+    response->message = "Connector movement sequence completed";
+    
+    
+  };
+  void main_callback()
+  {
+    
   }
 
+
+
+
   // Function to send command to Arduino node
-  // Input: command - character command ('h', 'f', 'm', 'n')
+  // Input: command - character command ('h', 'f', 'm', 'n', 'p', 'q')
   // Returns: true if command executed successfully, false otherwise
-  bool send_arduino_command(const char& command)
+
+  bool insertion_logic(const int& row , const int& col)
+  {
+    geometry_msgs::msg::Pose p  = connector_manager_.getConnectorPose(row, col);
+    movelinear(p.position.x, p.position.y, p.position.z,
+              p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w);
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+    {
+      (void)egripper(false);
+    }
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+    joglinear(0.0, 0.0, 0.01);
+
+    {
+      (void)egripper(true);
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+    }
+    joglinear(0.0, 0.0, -0.01);  
+   
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+    return true;
+  }
+
+  geometry_msgs::msg::Pose getConnectorPose_affine(int row, int col)
+  {
+      if (row <= 0 || col <= 0) {
+          throw std::invalid_argument("row and col must be 1-based positive integers.");
+      }
+
+      // ---- Model coefficients (least-squares fit to your measurements) ----
+      const double a = 0.236333333333;   // x intercept
+      const double b = 0.002000000000;   // x * col
+      const double c = 0.002500000000;   // x * row
+
+      const double d = -0.667833333333;  // y intercept
+      const double e = 0.001666666667;   // y * col
+      const double f = -0.002750000000;  // y * row
+
+      // ---- Base pose (1,1) z & orientation copied from your measurement ----
+      const double base_z = 0.279;
+      geometry_msgs::msg::Pose out;
+      out.orientation.x = -0.697;
+      out.orientation.y =  0.717;
+      out.orientation.z = -0.008;
+      out.orientation.w =  0.011;
+
+      // compute XY using the affine model
+      out.position.x = a + b * static_cast<double>(col) + c * static_cast<double>(row);
+      out.position.y = d + e * static_cast<double>(col) + f * static_cast<double>(row);
+      out.position.z = base_z;
+
+      return out;
+  }
+
+  bool send_arduino_command(char command)
   {
     if (!arduino_client_) {
       RCLCPP_ERROR(this->get_logger(), "Arduino client not initialized");
@@ -489,7 +646,7 @@ private:
     }
 
     auto request = std::make_shared<spark_stage_2_ur::srv::ArduinoCommand::Request>();
-    request->command = command;
+    request->command = std::string(1, command);
 
     RCLCPP_INFO(this->get_logger(), "Sending Arduino command: '%c'", command);
 
@@ -537,8 +694,8 @@ private:
 
   bool egripper(const bool& state){
 
-      int pin1 = 16; // actual pins on the ur controller box 
-      //int pin2 = 17;
+      int pin1 = 17; // actual pins on the ur controller box 
+      //int pin2 = 16;
       bool success1 = false;
       bool success2 = true;
 
@@ -587,13 +744,13 @@ private:
         pin_close = 4;  // Pin 4 HIGH = close
       }
       if (index == 1){
-        pin_open = 6;   // Pin 7 HIGH = open
-        pin_close = 7;  // Pin 6 HIGH = close
+        pin_open = 2;   // Pin 7 HIGH = open
+        pin_close = 1;  // Pin 6 HIGH = close
       }
 
       if (index == 2){
-        pin_open = 1;   // Pin 7 HIGH = open
-        pin_close = 2;  // Pin 6 HIGH = close
+        pin_open = 6;   // Pin 7 HIGH = open
+        pin_close = 7;  // Pin 6 HIGH = close
       }
 
 
@@ -818,7 +975,8 @@ private:
       // Execute the trajectory
       moveit::planning_interface::MoveGroupInterface::Plan plan;
       plan.trajectory_ = trajectory;
-      auto execute_result = move_group.execute(plan);
+      // auto execute_result =  move_group.execute(plan);
+      auto execute_result =  true;
       
       if (execute_result == moveit::core::MoveItErrorCode::SUCCESS) {
         response = {true, "Linear path executed successfully. Fraction: " + std::to_string(int(fraction * 100)) + "%"};
@@ -829,6 +987,92 @@ private:
       response = {false, "Cartesian path only " + std::to_string(int(fraction * 100)) + "% achievable - obstacles or joint limits"};
     }
     
+    return response;
+  }
+
+  /**
+   * @brief Move robot to specified joint angles
+   * @param j0 shoulder_pan_joint angle (radians)
+   * @param j1 shoulder_lift_joint angle (radians)
+   * @param j2 elbow_joint angle (radians)
+   * @param j3 wrist_1_joint angle (radians)
+   * @param j4 wrist_2_joint angle (radians)
+   * @param j5 wrist_3_joint angle (radians)
+   * @return pair<bool, string> - success status and message
+   * 
+   * NOTE: Function parameters use logical naming (j0=pan, j1=lift, etc.)
+   * but internally reorders to match actual /joint_states topic format:
+   *   /joint_states order: [shoulder_lift, elbow, wrist_1, wrist_2, wrist_3, shoulder_pan]
+   *   Function parameters:  [j0=pan, j1=lift, j2=elbow, j3=wrist1, j4=wrist2, j5=wrist3]
+   * 
+   * Example usage:
+   *   auto [success, msg] = movejoints(0.0, -1.57, 1.57, -1.57, 0.0, 0.0);
+   *   if (success) { RCLCPP_INFO(get_logger(), "Success: %s", msg.c_str()); }
+   */
+  std::pair<bool, std::string> movejoints(double j0, double j1, double j2, double j3, double j4, double j5)
+  {
+    RCLCPP_INFO(get_logger(), "=== MOVE TO JOINT ANGLES (Direct Publisher) ===");
+    RCLCPP_INFO(get_logger(), "Target joints (rad): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]", j0, j1, j2, j3, j4, j5);
+    RCLCPP_INFO(get_logger(), "Target joints (deg): [%.1f, %.1f, %.1f, %.1f, %.1f, %.1f]", 
+                j0*180.0/M_PI, j1*180.0/M_PI, j2*180.0/M_PI, 
+                j3*180.0/M_PI, j4*180.0/M_PI, j5*180.0/M_PI);
+
+    std::pair<bool, std::string> response = {false, "Not executed"};
+
+    try {
+      // Create trajectory message
+      trajectory_msgs::msg::JointTrajectory traj_msg;
+      
+      // Set the joint names (MUST match the EXACT order in joint_states topic)
+      // From joint_states: [shoulder_lift, elbow, wrist_1, wrist_2, wrist_3, shoulder_pan]
+      traj_msg.joint_names = {
+        "shoulder_lift_joint",  // index 0
+        "elbow_joint",          // index 1
+        "wrist_1_joint",        // index 2
+        "wrist_2_joint",        // index 3
+        "wrist_3_joint",        // index 4
+        "shoulder_pan_joint"    // index 5 (LAST, not first!)
+      };
+      
+      RCLCPP_INFO(get_logger(), "Joint order being sent (matches /joint_states order):");
+      RCLCPP_INFO(get_logger(), "  [0] shoulder_lift_joint   = %.3f rad (%.1f deg) <- j1", j1, j1*180.0/M_PI);
+      RCLCPP_INFO(get_logger(), "  [1] elbow_joint           = %.3f rad (%.1f deg) <- j2", j2, j2*180.0/M_PI);
+      RCLCPP_INFO(get_logger(), "  [2] wrist_1_joint         = %.3f rad (%.1f deg) <- j3", j3, j3*180.0/M_PI);
+      RCLCPP_INFO(get_logger(), "  [3] wrist_2_joint         = %.3f rad (%.1f deg) <- j4", j4, j4*180.0/M_PI);
+      RCLCPP_INFO(get_logger(), "  [4] wrist_3_joint         = %.3f rad (%.1f deg) <- j5", j5, j5*180.0/M_PI);
+      RCLCPP_INFO(get_logger(), "  [5] shoulder_pan_joint    = %.3f rad (%.1f deg) <- j0", j0, j0*180.0/M_PI);
+      
+      // Create a trajectory point with target positions
+      // Reorder to match joint_states: [j1, j2, j3, j4, j5, j0]
+      trajectory_msgs::msg::JointTrajectoryPoint point;
+      point.positions = {j1, j2, j3, j4, j5, j0};
+      
+      // Don't set velocities/accelerations - let controller compute them
+      // OR set them to empty to let controller decide
+      point.velocities = {};
+      point.accelerations = {};
+      
+      // Set time from start (slow motion - 50 seconds)
+      point.time_from_start = rclcpp::Duration::from_seconds(50.0);
+      
+      // Add the point to the trajectory
+      traj_msg.points.push_back(point);
+      
+      // Set timestamp to zero to execute immediately
+      traj_msg.header.stamp = rclcpp::Time(0);
+      traj_msg.header.frame_id = "";
+      
+      // Publish the trajectory
+      joint_trajectory_pub_->publish(traj_msg);
+      
+      RCLCPP_INFO(get_logger(), "Joint trajectory published successfully!");
+      response = {true, "Joint trajectory published to controller"};
+      
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "Exception during joint trajectory publishing: %s", e.what());
+      response = {false, std::string("Exception: ") + e.what()};
+    }
+
     return response;
   }
   
@@ -938,6 +1182,69 @@ private:
     } else {
       response->success = false;
       response->message = "Cartesian path only " + std::to_string(int(fraction * 100)) + "% achievable - obstacles or joint limits";
+    }
+  }
+
+  void move_to_joints_callback(const std::shared_ptr<spark_stage_2_ur::srv::MoveToJoints::Request> request,
+                                std::shared_ptr<spark_stage_2_ur::srv::MoveToJoints::Response> response)
+  {
+    RCLCPP_INFO(get_logger(), "=== MOVE TO JOINT ANGLES ===");
+    
+    // Validate input
+    if (request->joint_positions.size() != 6) {
+      RCLCPP_ERROR(get_logger(), "Expected 6 joint angles, got %zu", request->joint_positions.size());
+      response->success = false;
+      response->message = "Invalid number of joint angles. Expected 6, got " + 
+                         std::to_string(request->joint_positions.size());
+      return;
+    }
+
+    // Log the target joint angles with proper joint names
+    RCLCPP_INFO(get_logger(), "Target joint angles (rad): [%.3f, %.3f, %.3f, %.3f, %.3f, %.3f]",
+                request->joint_positions[0], request->joint_positions[1], 
+                request->joint_positions[2], request->joint_positions[3],
+                request->joint_positions[4], request->joint_positions[5]);
+    RCLCPP_INFO(get_logger(), "Joint order: [shoulder_pan, shoulder_lift, elbow, wrist_1, wrist_2, wrist_3]");
+
+    // Set joint value target
+    try {
+      std::vector<double> joint_group_positions(request->joint_positions.begin(), 
+                                                request->joint_positions.end());
+      
+      move_group.setJointValueTarget(joint_group_positions);
+      move_group.setPlanningTime(5.0);
+      
+      // Plan the motion
+      moveit::planning_interface::MoveGroupInterface::Plan plan;
+      moveit::core::MoveItErrorCode success_code = move_group.plan(plan);
+      
+      if (success_code != moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_ERROR(get_logger(), "Planning to joint angles failed with error code: %d", 
+                     success_code.val);
+        response->success = false;
+        response->message = "Planning failed with error code: " + std::to_string(success_code.val);
+        return;
+      }
+      
+      RCLCPP_INFO(get_logger(), "Planning successful! Executing motion...");
+      
+      // Execute the planned motion
+      moveit::core::MoveItErrorCode execute_code = move_group.execute(plan);
+      
+      if (execute_code == moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_INFO(get_logger(), "Successfully moved to target joint angles");
+        response->success = true;
+        response->message = "Successfully moved to joint angles";
+      } else {
+        RCLCPP_ERROR(get_logger(), "Execution failed with error code: %d", execute_code.val);
+        response->success = false;
+        response->message = "Execution failed with error code: " + std::to_string(execute_code.val);
+      }
+      
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "Exception during joint motion: %s", e.what());
+      response->success = false;
+      response->message = std::string("Exception: ") + e.what();
     }
   }
 
