@@ -27,6 +27,7 @@
   <depend>ur_client_library</depend>
   <depend>yaml-cpp</depend>
   <depend>ament_index_cpp</depend>
+  <depend>pcb_visualization_msgs</depend>
 
   <!-- Launch/runtime dependencies for our launch files -->
   <exec_depend>launch</exec_depend>

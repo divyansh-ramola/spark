@@ -26,6 +26,7 @@ find_package(ur_msgs REQUIRED)
 find_package(ur_client_library REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(ament_index_cpp REQUIRED)
+find_package(pcb_visualization_msgs REQUIRED)
 
 # Generate service interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -72,6 +73,7 @@ ament_target_dependencies(move_to_pose_node
   tf2_geometry_msgs
   ur_msgs
   ament_index_cpp
+  pcb_visualization_msgs
 )
 
 # Link libraries

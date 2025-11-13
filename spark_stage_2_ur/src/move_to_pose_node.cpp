@@ -5,6 +5,7 @@
 #include "spark_stage_2_ur/srv/move_linear_quat.hpp"
 #include "spark_stage_2_ur/srv/arduino_command.hpp"
 #include "spark_stage_2_ur/srv/move_to_joints.hpp"
+#include "pcb_visualization_msgs/srv/set_grid_positions.hpp"
 #include <moveit/move_group_interface/move_group_interface.h>
 #include <tf2/LinearMath/Quaternion.h>
 #include <tf2/LinearMath/Matrix3x3.h>
@@ -83,6 +84,7 @@ public:
     // Create callback groups to allow sensor callbacks to run concurrently with services
     group_sensors_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     group_services_ = this->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
+    group_grid_service_ = this->create_callback_group(rclcpp::CallbackGroupType::Reentrant);
 
     pick_service = create_service<std_srvs::srv::Trigger>(
       "move_to_pose",
@@ -106,9 +108,23 @@ public:
       rmw_qos_profile_services_default,
       group_services_);
 
+    // Set grid positions service (uses Reentrant callback group to avoid deadlocks)
+    grid_positions_service = create_service<pcb_visualization_msgs::srv::SetGridPositions>(
+      "set_grid_positions",
+      std::bind(&MoveToPoseNode::set_grid_positions_callback, this, std::placeholders::_1, std::placeholders::_2),
+      rmw_qos_profile_services_default,
+      group_grid_service_);
+
     gripper_client_ = create_client<ur_msgs::srv::SetIO>("/io_and_status_controller/set_io");
-    while (!gripper_client_->wait_for_service(std::chrono::seconds(2))) {
-      RCLCPP_INFO(this->get_logger(), "Waiting for /io_and_status_controller/set_io service to be available...");
+    // Check for gripper service but don't block indefinitely
+    int gripper_wait_attempts = 0;
+    while (!gripper_client_->wait_for_service(std::chrono::seconds(1)) && gripper_wait_attempts < 5) {
+      RCLCPP_WARN(this->get_logger(), "Waiting for /io_and_status_controller/set_io service... (attempt %d/5)", ++gripper_wait_attempts);
+    }
+    if (gripper_wait_attempts >= 5) {
+      RCLCPP_WARN(this->get_logger(), "Gripper service not available after 5 attempts, continuing anyway...");
+    } else {
+      RCLCPP_INFO(this->get_logger(), "Gripper service is available");
     }
 
     arduino_client_ = create_client<spark_stage_2_ur::srv::ArduinoCommand>("arduino/send_command");
@@ -157,6 +173,8 @@ public:
     RCLCPP_INFO(this->get_logger(), "  - /move_to_pose_full (full pose control: XYZ + quaternion XYZW)");
     RCLCPP_INFO(this->get_logger(), "  - /move_linear_rpy (linear Cartesian: XYZ + RPY angles)");
     RCLCPP_INFO(this->get_logger(), "  - /move_linear_quat (linear Cartesian: XYZ + quaternion XYZW)");
+    RCLCPP_INFO(this->get_logger(), "  - /move_to_joints (direct joint angle control)");
+    RCLCPP_INFO(this->get_logger(), "  - /set_grid_positions (process grid positions array)");
   }
 
 private:
@@ -167,11 +185,13 @@ private:
   rclcpp::Service<spark_stage_2_ur::srv::MoveLinearRPY>::SharedPtr linear_rpy_service;
   rclcpp::Service<spark_stage_2_ur::srv::MoveLinearQuat>::SharedPtr linear_quat_service;
   rclcpp::Service<spark_stage_2_ur::srv::MoveToJoints>::SharedPtr joints_service;
+  rclcpp::Service<pcb_visualization_msgs::srv::SetGridPositions>::SharedPtr grid_positions_service;
   moveit::planning_interface::PlanningSceneInterface planning_scene_interface;
 
   // Separate callback groups so sensor callbacks can run in parallel with services
   rclcpp::CallbackGroup::SharedPtr group_sensors_;
   rclcpp::CallbackGroup::SharedPtr group_services_;
+  rclcpp::CallbackGroup::SharedPtr group_grid_service_;  // Reentrant group for grid service to avoid deadlocks
 
   // Joint trajectory action client for direct control
   using FollowJointTrajectory = control_msgs::action::FollowJointTrajectory;
@@ -415,104 +435,104 @@ private:
   {
    
 
+   
     movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
-    // send_arduino_command('h'); // command to arduino to move the pick jig in place
-    //  send_arduino_command('m');
-    //  {
-    //   bool grip_ok = ngripper(false,0);
-    //   if(!grip_ok){
-    //     RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
-    //     response->success = false;
-    //     response->message = "Failed to open gripper DO0";
-    //     return;
-    //   }
-    // }
+    send_arduino_command('h'); // command to arduino to move the pick jig in place
+     send_arduino_command('m');
+     {
+      bool grip_ok = ngripper(false,0);
+      if(!grip_ok){
+        RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
+        response->success = false;
+        response->message = "Failed to open gripper DO0";
+        return;
+      }
+    }
       
    
 
-    // {
-    //   bool grip_ok = ngripper(false,1);
-    // }
-    // {
-    //   bool grip_ok = ngripper(false,2);
-    //   (void)egripper(false);
-    // }
+    {
+      bool grip_ok = ngripper(false,1);
+    }
+    {
+      bool grip_ok = ngripper(false,2);
+      (void)egripper(false);
+    }
     
-    // movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
-    // // Configure attempts across Y offsets (stop only when vacuum becomes active)
-    // const int no_of_tries = 7;
-    // const int kMaxSteps = 200;  // safety stop per attempt
+    movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
+    // Configure attempts across Y offsets (stop only when vacuum becomes active)
+    const int no_of_tries = 7;
+    const int kMaxSteps = 200;  // safety stop per attempt
    
     
-    // bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
+    bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.005);
 
 
-    // if(detected && vacuum_active_.load()){
-    //   auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
-    //   joglinear(0.015, 0, 0);
-    //   joglinear(-0.015, 0, 0); //shake wire a bit
-    //   (void)ngripper(true,0);
-    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
+    if(detected && vacuum_active_.load()){
+      auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
+      joglinear(0.015, 0, 0);
+      joglinear(-0.015, 0, 0); //shake wire a bit
+      (void)ngripper(true,0);
+      movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
 
-    // }else{
-    //   movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
-    //   bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
-    //   if(detected && vacuum_active_.load()){
-    //     movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
-    //     auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
-    //     (void)ngripper(true,0);
-    //     movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
-    //   }else{
-    //     response->success = false;
-    //     response->message = "Wire detection failed";
-    //     return;
-    //   }
-    // }
+    }else{
+      movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
+      bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
+      if(detected && vacuum_active_.load()){
+        movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
+        auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
+        (void)ngripper(true,0);
+        movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
+      }else{
+        response->success = false;
+        response->message = "Wire detection failed";
+        return;
+      }
+    }
 
+
+    movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061); /// at the place jig top 
+    movelinear(0.722, -0.260, 0.591, 0.998, 0.016, 0.020, -0.061); /// at the place jig 
+    movelinear(0.699, -0.278, 0.580, 0.998, 0.016, 0.020, -0.061); /// at the place jig thrust
    
-
-    
-    // // movelinear(0.653, -0.339, 0.707,0.997, 0.059, 0.011, -0.057); /// top 
-   
-    // // movelinear(0.653, -0.339, 0.582,0.997, 0.059, 0.011, -0.057); /// at ht ejig
-    // // movelinear(0.672, -0.319, 0.585, 0.997, 0.059, 0.011, -0.057); /// at ht ejig
-
 
 
     
    
 
-    // // {
-    // //   // command to arduino to move the pick jig in place
-    // //   send_arduino_command('p');
-    // //   bool grip_ok = ngripper(true,1);
-    // // } 
-    // // {
-    // //   bool grip_ok = ngripper(false,0);
-    // //   rclcpp::sleep_for(std::chrono::milliseconds(1000));
-    // // }
-    // // movelinear(0.672, -0.319, 0.800, 0.997, 0.059, 0.011, -0.057); /// at ht ejig  
+    {
+      // command to arduino to move the pick jig in place
+      send_arduino_command('p');
+      bool grip_ok = ngripper(true,1);
+    } 
+    {
+      bool grip_ok = ngripper(false,0);
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+    }
+    movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061); /// at the place jig top 
     
-    // // {
-    // //   send_arduino_command('a'); // command to arduino to push the connector in place
-    // //   send_arduino_command('f'); // command to arduino to push the connector in place
-    // //   send_arduino_command('b'); // command to arduino to move the pick jig in place   
-    // //   (void)ngripper(true,2); 
-    // //   (void)ngripper(false,1);
-    // //   send_arduino_command('n'); // command to arduino to move the pick jig in place 
-    // // }
+    {
+      send_arduino_command('a'); // command to arduino to push the connector in place
+      send_arduino_command('f'); // command to arduino to push the connector in place
+      send_arduino_command('b'); // command to arduino to move the pick jig in place   
+      (void)ngripper(true,2); 
+      (void)ngripper(false,1);
+      send_arduino_command('n'); // command to arduino to move the pick jig in place 
+    }
 
-    
-    // // {
-    // //   // (void)egripper(true);
-    // //   // rclcpp::sleep_for(std::chrono::milliseconds(1000));
-    // //   // (void)ngripper(false,2);
-    // //   // rclcpp::sleep_for(std::chrono::milliseconds(1000));
-    // // }
-      movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
-
+          movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
+    {
+      (void)egripper(false);
       movelinear(0.664, -0.310, 0.506 ,0.720, -0.016, -0.514, 0.466); //at the tip 
-      movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+      (void)egripper(true);
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+      (void)ngripper(false,2);
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+    }
+
+          
+          movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
 
 
 
@@ -521,48 +541,46 @@ private:
       
 
 
+      movelinear(0.788, -0.152, 0.854 ,0.733, -0.680, -0.006, -0.035); ///at connector top
 
+      {
+        joglinear(0.0, 0.0, -0.100);
+        rclcpp::sleep_for(std::chrono::milliseconds(500));
+        joglinear(0.0, 0.0, -0.100);
+        rclcpp::sleep_for(std::chrono::milliseconds(500));
+        joglinear(0.0, 0.0, -0.100);
+      }
+      // movelinear(0.788, -0.152, 0.554 ,0.733, -0.680, -0.006, -0.035); ///at connector 1,1
+        rclcpp::sleep_for(std::chrono::milliseconds(500));
+      joglinear(0.0, 0.0, -0.007);
 
-
-
-
-
-
-
-
-
-    // joglinear(0.0, 0.0, 0.200);
-
-
+      {
+        (void)egripper(false);
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+      joglinear(0.0, 0.0, 0.011);
+      {
+        (void)egripper(true);
+        rclcpp::sleep_for(std::chrono::milliseconds(500));
+      }
+      joglinear(0.0, 0.0, -0.011);  
     
-    //   send_arduino_command('p'); // command to arduino to move the pick jig in place
-    //   bool grip_ok = ngripper(true,1);
-    // } 
-    // movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the jig 
-    // send_arduino_command('f'); // command to arduino to push the connector in place 
-    // movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the  pick jig
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+      {
+        bool grip_ok = egripper(false);
+
+        movelinear(0.788, -0.152, 0.800 ,0.733, -0.680, -0.006, -0.035); ///at connector top
+        bool grip_ok1 = egripper(false);
+      }
 
 
-    // {
-    //   bool grip_ok = ngripper(true,1);
-    //   send_arduino_command('q'); // command to arduino to move the pick jig in place
-    // } 
-    // {
-    //   bool grip_ok = egripper(false);
-    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// at the pick jig
-    //   bool grip_ok = egripper(true);
-    //   bool grip_ok2 = ngripper(false,0);
-    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the pick jig
-    // }
-    // {
-    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the  connector
-    //   row  int row = 1;
-    //   int col = 8;
-    //   bool insertion = insertion_logic(row, col);
-    //   bool grip_ok2 = egripper(false);
-    //   joglinear(0.0, 0.0, 0.050);
-    //   movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005); /// top of the pick jig
-    // }
+
+
+
+
+
+
 
 
 
@@ -591,17 +609,20 @@ private:
               p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w);
     rclcpp::sleep_for(std::chrono::milliseconds(500));
 
+   
+    rclcpp::sleep_for(std::chrono::milliseconds(500));
+    joglinear(0.0, 0.0, -0.007);
+
     {
       (void)egripper(false);
     }
     rclcpp::sleep_for(std::chrono::milliseconds(500));
-    joglinear(0.0, 0.0, 0.01);
-
+    joglinear(0.0, 0.0, 0.011);
     {
       (void)egripper(true);
       rclcpp::sleep_for(std::chrono::milliseconds(500));
     }
-    joglinear(0.0, 0.0, -0.01);  
+    joglinear(0.0, 0.0, -0.011);  
    
     rclcpp::sleep_for(std::chrono::milliseconds(500));
     return true;
@@ -975,8 +996,8 @@ private:
       // Execute the trajectory
       moveit::planning_interface::MoveGroupInterface::Plan plan;
       plan.trajectory_ = trajectory;
-      // auto execute_result =  move_group.execute(plan);
-      auto execute_result =  true;
+      auto execute_result =  move_group.execute(plan);
+      // auto execute_result =  true;
       
       if (execute_result == moveit::core::MoveItErrorCode::SUCCESS) {
         response = {true, "Linear path executed successfully. Fraction: " + std::to_string(int(fraction * 100)) + "%"};
@@ -1243,6 +1264,64 @@ private:
       
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "Exception during joint motion: %s", e.what());
+      response->success = false;
+      response->message = std::string("Exception: ") + e.what();
+    }
+  }
+
+  void set_grid_positions_callback(const std::shared_ptr<pcb_visualization_msgs::srv::SetGridPositions::Request> request,
+                                    std::shared_ptr<pcb_visualization_msgs::srv::SetGridPositions::Response> response)
+  {
+    RCLCPP_INFO(get_logger(), "=== SET GRID POSITIONS SERVICE CALLED ===");
+    RCLCPP_INFO(get_logger(), "Received %zu grid position indices", request->positions.size());
+    
+    // Log the grid positions
+    for (size_t i = 0; i < request->positions.size(); ++i) {
+      RCLCPP_INFO(get_logger(), "  Position[%zu]: %d", i, request->positions[i]);
+    }
+    
+    try {
+      // Process each grid position
+      for (const auto& position : request->positions) {
+        // Convert 1D position to row/col (assuming a grid layout)
+        // You may need to adjust this logic based on your grid structure
+        // Example: For an 8-column grid:
+        int cols = 8;  // Adjust based on your actual grid
+        int row = position / cols + 1;  // 1-based indexing
+        int col = position % cols + 1;  // 1-based indexing
+        
+        RCLCPP_INFO(get_logger(), "Processing position %d -> (row=%d, col=%d)", position, row, col);
+        
+        // Get the connector pose for this grid position
+        geometry_msgs::msg::Pose target_pose = connector_manager_.getConnectorPose(row, col);
+        
+        RCLCPP_INFO(get_logger(), "Moving to position (%.3f, %.3f, %.3f)", 
+                    target_pose.position.x, target_pose.position.y, target_pose.position.z);
+        
+        // Move to the position using movelinear
+        auto [success, message] = movelinear(
+          target_pose.position.x, target_pose.position.y, target_pose.position.z,
+          target_pose.orientation.x, target_pose.orientation.y, 
+          target_pose.orientation.z, target_pose.orientation.w
+        );
+        
+        if (!success) {
+          RCLCPP_ERROR(get_logger(), "Failed to move to position %d: %s", position, message.c_str());
+          response->success = false;
+          response->message = "Failed at position " + std::to_string(position) + ": " + message;
+          return;
+        }
+        
+        // Optional: Add a small delay between movements
+        rclcpp::sleep_for(std::chrono::milliseconds(500));
+      }
+      
+      response->success = true;
+      response->message = "Successfully processed " + std::to_string(request->positions.size()) + " grid positions";
+      RCLCPP_INFO(get_logger(), "All grid positions processed successfully");
+      
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(get_logger(), "Exception during grid position processing: %s", e.what());
       response->success = false;
       response->message = std::string("Exception: ") + e.what();
     }
