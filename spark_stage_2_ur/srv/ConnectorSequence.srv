@@ -1,0 +1,7 @@
+# Request: row and column for connector insertion
+int32 row
+int32 col
+---
+# Response: boolean indicating success and message
+bool success
+string message

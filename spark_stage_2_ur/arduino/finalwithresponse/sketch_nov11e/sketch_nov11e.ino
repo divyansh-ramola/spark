@@ -1,9 +1,10 @@
 /*
-  Dual Stepper Motor Control for ROS2 (No Extra Steps After Homing)
+  Dual Stepper Motor Control for ROS2 (Extra Steps After Metal Detection)
 
   Commands:
-  - 'h': Homes both motors in sequence
-  - 'f': Moves Motor 0 in homing direction until away limit switch detected (pin 45 HIGH)
+  - 'h': Homes only Motor 1
+  - 'f': Moves Motor 0 in find direction until metal detected (SENSOR_PIN_1 HIGH),
+         then performs EXTRA_STEPS_AFTER_DETECTION steps
   - 'm': Moves Motor 0 away from home until away limit switch is triggered
   - 'n': Moves Motor 1 away from home
   - 'p': Moves Motor 0 towards home (fixed steps defined in config)
@@ -23,8 +24,10 @@
 #define FIND_DIR_0 LOW  // Find direction (same as homing)
 int stepDelay_0 = 800;
 int stepDelay_0_find = 2000;
+
 // --- FIND METAL CONFIG ---
-#define MAX_FIND_STEPS_0 2200  // Maximum steps allowed for 'f' command (safety limit)
+#define MAX_FIND_STEPS_0 3000    // Maximum steps allowed for 'f' command (safety limit)
+#define EXTRA_STEPS_AFTER_DETECTION 250  // Extra steps after metal is detected ✅
 
 long maxHomingSteps_0 = 200000;
 
@@ -41,15 +44,15 @@ long maxHomingSteps_1 = 200000;
 #define FIND_DIR_1 LOW
 
 // --- MOVE AWAY CONFIG ---
-#define MOVE_AWAY_STEPS_1 3000
+#define MOVE_AWAY_STEPS_1 1600
 
 // --- MOVE TOWARDS HOME CONFIG ---
 #define MOVE_TOWARDS_HOME_STEPS_0 800
 #define MOVE_TOWARDS_HOME_STEPS_1 500
 
-// --- MANUAL MOVE CONFIG (NEW) ---
-#define MOVE_MOTOR1_FORWARD_STEPS 400  // 'a' command steps
-#define MOVE_MOTOR1_BACKWARD_STEPS 350  // 'b' command steps
+// --- MANUAL MOVE CONFIG ---
+#define MOVE_MOTOR1_FORWARD_STEPS 400
+#define MOVE_MOTOR1_BACKWARD_STEPS 350
 
 // --- GLOBAL VARIABLES ---
 bool motor0Stopped = false;
@@ -71,40 +74,7 @@ void takeOneStep1() {
 }
 
 // =========================================================================
-bool homeMotor0() {
-  long stepCount = 0;
-  bool homingFailed = false;
-
-  // If already pressed, back off
-  if (digitalRead(LIMIT_SWITCH_PIN_0) == LOW) {
-    digitalWrite(DIR_PIN_0, !HOMING_DIR_0);
-    while (stepCount < maxHomingSteps_0) {
-      takeOneStep0();
-      stepCount++;
-      if (digitalRead(LIMIT_SWITCH_PIN_0) == HIGH) break;
-    }
-    if (stepCount >= maxHomingSteps_0) homingFailed = true;
-  }
-
-  stepCount = 0;
-
-  if (!homingFailed) {
-    digitalWrite(DIR_PIN_0, HOMING_DIR_0);
-    while (stepCount < maxHomingSteps_0) {
-      takeOneStep0();
-      stepCount++;
-      if (digitalRead(LIMIT_SWITCH_PIN_0) == LOW) {
-        motor0Stopped = true;
-        break;
-      }
-    }
-    if (!motor0Stopped) homingFailed = true;
-  }
-
-  motor0Stopped = true;
-  return !homingFailed;
-}
-
+// HOMING: Motor 1 only (Motor 0 removed ✅)
 bool homeMotor1() {
   long stepCount = 0;
   bool homingFailed = false;
@@ -138,6 +108,8 @@ bool homeMotor1() {
   return !homingFailed;
 }
 
+// =========================================================================
+// FIND METAL (Motor 0) — Now includes extra steps after detection ✅
 bool findMetalMotor0() {
   Serial.println("=== Finding Metal (Motor 0) ===");
   long stepCount = 0;
@@ -152,12 +124,18 @@ bool findMetalMotor0() {
   digitalWrite(DIR_PIN_0, FIND_DIR_0);
   Serial.println("M0 moving to find metal...");
 
-  while (stepCount < MAX_FIND_STEPS_0) {  // <-- Limited by MAX_FIND_STEPS_0
+  while (stepCount < MAX_FIND_STEPS_0) {
     takeOneStep0();
     stepCount++;
 
     if (digitalRead(SENSOR_PIN_1) == HIGH) {
-      Serial.println("M0 Metal Found! Stopping immediately.");
+      Serial.println("M0 Metal Found! Doing extra steps...");
+      
+      // Perform extra steps after detection
+      for (int i = 0; i < EXTRA_STEPS_AFTER_DETECTION; i++) {
+        takeOneStep0();
+      }
+
       motor0Stopped = true;
       break;
     }
@@ -172,7 +150,7 @@ bool findMetalMotor0() {
   return true;
 }
 
-
+// =========================================================================
 bool moveAway0() {
   long stepCount = 0;
   bool movingFailed = false;
@@ -233,7 +211,6 @@ bool moveTowardsHome1() {
 }
 
 // --- NEW COMMANDS ---
-// Move Motor 1 Forward
 bool moveMotor1Forward() {
   digitalWrite(DIR_PIN_1, !HOMING_DIR_1);
   for (long i = 0; i < MOVE_MOTOR1_FORWARD_STEPS; i++) takeOneStep1();
@@ -241,7 +218,6 @@ bool moveMotor1Forward() {
   return true;
 }
 
-// Move Motor 1 Backward
 bool moveMotor1Backward() {
   digitalWrite(DIR_PIN_1, HOMING_DIR_1);
   for (long i = 0; i < MOVE_MOTOR1_BACKWARD_STEPS; i++) takeOneStep1();
@@ -278,9 +254,8 @@ void loop() {
     char command = commandStr[0];
     bool success = false;
 
-    // Execute command and send appropriate response
     if (command == 'h') {
-      success = homeMotor0() && homeMotor1();
+      success = homeMotor1();  // ✅ Only Motor 1 now
       if (success) Serial.println("HOME_COMPLETE");
       else Serial.println("HOME_FAILED");
     }

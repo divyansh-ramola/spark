@@ -1,5 +1,7 @@
 #include <rclcpp/rclcpp.hpp>
 #include <std_srvs/srv/trigger.hpp>
+#include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/int32.hpp>
 #include "spark_stage_2_ur/srv/move_to_pose.hpp"
 #include "spark_stage_2_ur/srv/move_linear_rpy.hpp"
 #include "spark_stage_2_ur/srv/move_linear_quat.hpp"
@@ -166,6 +168,10 @@ public:
     define_table_collision_object();
     //allow_table_base_contact();
 
+    // Create status publishers
+    grid_position_pub_ = create_publisher<std_msgs::msg::Int32>("/grid_position_update", 10);
+    process_status_pub_ = create_publisher<std_msgs::msg::String>("/process_status", 10);
+    RCLCPP_INFO(this->get_logger(), "Status publishers created");
     
     RCLCPP_INFO(this->get_logger(), "Node ready - services available:");
     RCLCPP_INFO(this->get_logger(), "  - /move_to_pose (linear Cartesian, offset-based)");
@@ -231,6 +237,10 @@ private:
 
   // Connector position manager
   connector_position::ConnectorPositionManager connector_manager_;
+
+  // Publishers for status updates
+  rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr grid_position_pub_;
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr process_status_pub_;
 
 
   void vacuum_callback(const ur_msgs::msg::IOStates::SharedPtr msg)
@@ -433,166 +443,32 @@ private:
   void move_callback(const std::shared_ptr<std_srvs::srv::Trigger::Request> /*request*/,
                      std::shared_ptr<std_srvs::srv::Trigger::Response> response)
   {
-   
-
-   
-    movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
-    send_arduino_command('h'); // command to arduino to move the pick jig in place
-     send_arduino_command('m');
-     {
-      bool grip_ok = ngripper(false,0);
-      if(!grip_ok){
-        RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
-        response->success = false;
-        response->message = "Failed to open gripper DO0";
-        return;
-      }
-    }
-      
-   
-
-    {
-      bool grip_ok = ngripper(false,1);
-    }
-    {
-      bool grip_ok = ngripper(false,2);
-      (void)egripper(false);
-    }
-    
-    movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
-    // Configure attempts across Y offsets (stop only when vacuum becomes active)
-    const int no_of_tries = 7;
-    const int kMaxSteps = 200;  // safety stop per attempt
-   
-    
-    bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.005);
-
-
-    if(detected && vacuum_active_.load()){
-      auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
-      joglinear(0.015, 0, 0);
-      joglinear(-0.015, 0, 0); //shake wire a bit
-      (void)ngripper(true,0);
-      movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
-
-    }else{
-      movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
-      bool detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
-      if(detected && vacuum_active_.load()){
-        movelinear(0.014, -0.746, 0.314 ,-0.707, 0.707, 0.004, -0.005);
-        auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
-        (void)ngripper(true,0);
-        movelinear(0.017, -0.746, 0.707 ,-0.706, 0.708, 0.005, -0.005);
-      }else{
-        response->success = false;
-        response->message = "Wire detection failed";
-        return;
-      }
-    }
-
-
-    movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061); /// at the place jig top 
-    movelinear(0.722, -0.260, 0.591, 0.998, 0.016, 0.020, -0.061); /// at the place jig 
-    movelinear(0.699, -0.278, 0.580, 0.998, 0.016, 0.020, -0.061); /// at the place jig thrust
-   
-
-
-    
-   
-
-    {
-      // command to arduino to move the pick jig in place
-      send_arduino_command('p');
-      bool grip_ok = ngripper(true,1);
-    } 
-    {
-      bool grip_ok = ngripper(false,0);
-      rclcpp::sleep_for(std::chrono::milliseconds(1000));
-    }
-    movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061); /// at the place jig top 
-    
-    {
-      send_arduino_command('a'); // command to arduino to push the connector in place
-      send_arduino_command('f'); // command to arduino to push the connector in place
-      send_arduino_command('b'); // command to arduino to move the pick jig in place   
-      (void)ngripper(true,2); 
-      (void)ngripper(false,1);
-      send_arduino_command('n'); // command to arduino to move the pick jig in place 
-    }
-
-          movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
-    {
-      (void)egripper(false);
-      movelinear(0.664, -0.310, 0.506 ,0.720, -0.016, -0.514, 0.466); //at the tip 
-      rclcpp::sleep_for(std::chrono::milliseconds(1000));
-      (void)egripper(true);
-      rclcpp::sleep_for(std::chrono::milliseconds(1000));
-      (void)ngripper(false,2);
-      rclcpp::sleep_for(std::chrono::milliseconds(1000));
-    }
-
-          
-          movelinear(0.664, -0.310, 0.767 ,0.720, -0.016, -0.514, 0.466); //top at the tip 
-
-
-
-  
-
-      
-
-
-      movelinear(0.788, -0.152, 0.854 ,0.733, -0.680, -0.006, -0.035); ///at connector top
-
-      {
-        joglinear(0.0, 0.0, -0.100);
-        rclcpp::sleep_for(std::chrono::milliseconds(500));
-        joglinear(0.0, 0.0, -0.100);
-        rclcpp::sleep_for(std::chrono::milliseconds(500));
-        joglinear(0.0, 0.0, -0.100);
-      }
-      // movelinear(0.788, -0.152, 0.554 ,0.733, -0.680, -0.006, -0.035); ///at connector 1,1
-        rclcpp::sleep_for(std::chrono::milliseconds(500));
-      joglinear(0.0, 0.0, -0.007);
-
-      {
-        (void)egripper(false);
-      }
-      rclcpp::sleep_for(std::chrono::milliseconds(500));
-      joglinear(0.0, 0.0, 0.011);
-      {
-        (void)egripper(true);
-        rclcpp::sleep_for(std::chrono::milliseconds(500));
-      }
-      joglinear(0.0, 0.0, -0.011);  
-    
-      rclcpp::sleep_for(std::chrono::milliseconds(500));
-
-      {
-        bool grip_ok = egripper(false);
-
-        movelinear(0.788, -0.152, 0.800 ,0.733, -0.680, -0.006, -0.035); ///at connector top
-        bool grip_ok1 = egripper(false);
-      }
-
-
-
-
-
-
-
-
-
-
-
-
-    response->success = true;
-    response->message = "Connector movement sequence completed";
-    
-    
+    // Use hardcoded row=2, col=5 for backwards compatibility with existing code
+    auto [success, message] = run_connector_sequence(2, 5);
+    response->success = success;
+    response->message = message;
   };
   void main_callback()
   {
     
+  }
+
+  // Helper function to publish process status
+  void publish_status(const std::string& status)
+  {
+    auto msg = std_msgs::msg::String();
+    msg.data = status;
+    process_status_pub_->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Status: %s", status.c_str());
+  }
+
+  // Helper function to publish grid position update
+  void publish_grid_position(int position)
+  {
+    auto msg = std_msgs::msg::Int32();
+    msg.data = position;
+    grid_position_pub_->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Grid position update: %d", position);
   }
 
 
@@ -602,30 +478,273 @@ private:
   // Input: command - character command ('h', 'f', 'm', 'n', 'p', 'q')
   // Returns: true if command executed successfully, false otherwise
 
-  bool insertion_logic(const int& row , const int& col)
+  // Full connector insertion sequence for a specific row and column
+  // Returns {success, message}
+  std::pair<bool, std::string> run_connector_sequence(const int& row, const int& col)
   {
-    geometry_msgs::msg::Pose p  = connector_manager_.getConnectorPose(row, col);
-    movelinear(p.position.x, p.position.y, p.position.z,
-              p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w);
-    rclcpp::sleep_for(std::chrono::milliseconds(500));
+    RCLCPP_INFO(this->get_logger(), "========================================");
+    RCLCPP_INFO(this->get_logger(), "Starting connector sequence for row=%d, col=%d", row, col);
+    RCLCPP_INFO(this->get_logger(), "========================================");
 
-   
-    rclcpp::sleep_for(std::chrono::milliseconds(500));
-    joglinear(0.0, 0.0, -0.007);
+    // Helper lambda for automatic retry logic (retry once if failed)
+    auto execute_with_retry = [this](const std::string& step_name, 
+                                      std::function<bool()> operation) -> bool {
+      // First attempt
+      RCLCPP_INFO(this->get_logger(), "=== %s - Attempt 1/2 ===", step_name.c_str());
+      bool success = operation();
+      
+      if (success) {
+        RCLCPP_INFO(this->get_logger(), "%s completed successfully", step_name.c_str());
+        return true;
+      }
+      
+      // First attempt failed, retry once
+      RCLCPP_WARN(this->get_logger(), "%s failed on attempt 1, retrying...", step_name.c_str());
+      rclcpp::sleep_for(std::chrono::milliseconds(500)); // Brief delay before retry
+      
+      // Second attempt
+      RCLCPP_INFO(this->get_logger(), "=== %s - Attempt 2/2 ===", step_name.c_str());
+      success = operation();
+      
+      if (success) {
+        RCLCPP_INFO(this->get_logger(), "%s completed successfully on retry", step_name.c_str());
+        return true;
+      }
+      
+      RCLCPP_ERROR(this->get_logger(), "%s failed after 2 attempts", step_name.c_str());
+      return false;
+    };
 
-    {
-      (void)egripper(false);
+    // Step 1: Initial positioning
+    if (!execute_with_retry("Step 1: Initial positioning", [&]() {
+      auto [ok, msg] = movelinear(0.017, -0.746, 0.707, -0.706, 0.708, 0.005, -0.005);
+      return ok;
+    })) {
+      return {false, "Step 1: Initial positioning failed"};
     }
-    rclcpp::sleep_for(std::chrono::milliseconds(500));
-    joglinear(0.0, 0.0, 0.011);
-    {
-      (void)egripper(true);
+
+    // Step 2: Arduino setup and gripper initialization
+    if (!execute_with_retry("Step 2: Arduino setup and gripper init", [&]() {
+      if (!send_arduino_command('h')) return false;
+      if (!send_arduino_command('m')) return false;
+      if (!ngripper(false, 0)) {
+        RCLCPP_ERROR(this->get_logger(), "Failed to open gripper DO0");
+        return false;
+      }
+      ngripper(false, 1);
+      ngripper(false, 2);
+      egripper(false);
+      return true;
+    })) {
+      return {false, "Step 2: Arduino setup and gripper init failed"};
+    }
+
+    // Step 3: Move to wire detection position
+    if (!execute_with_retry("Step 3: Move to wire detection position", [&]() {
+      auto [ok, msg] = movelinear(0.014, -0.746, 0.314, -0.707, 0.707, 0.004, -0.005);
+      return ok;
+    })) {
+      return {false, "Step 3: Move to wire detection position failed"};
+    }
+
+    // Step 4: Wire detection (first attempt)
+    bool wire_detected = false;
+    if (!execute_with_retry("Step 4: Wire detection (fine scan)", [&]() {
+      const int no_of_tries = 7;
+      const int kMaxSteps = 200;
+      wire_detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.005);
+      return wire_detected;
+    })) {
+      // Try coarse scan if fine scan failed
+      RCLCPP_WARN(this->get_logger(), "Fine scan failed, attempting coarse scan...");
+      
+      if (!execute_with_retry("Step 4b: Wire detection (coarse scan)", [&]() {
+        auto [ok, msg] = movelinear(0.014, -0.746, 0.314, -0.707, 0.707, 0.004, -0.005);
+        if (!ok) return false;
+        
+        const int no_of_tries = 7;
+        const int kMaxSteps = 200;
+        wire_detected = perform_descent_with_y_scanning(no_of_tries, kMaxSteps, 0.010);
+        return wire_detected;
+      })) {
+        return {false, "Step 4: Wire detection failed (both fine and coarse)"};
+      }
+    }
+
+    // Step 5: Wire pickup
+    if (!execute_with_retry("Step 5: Wire pickup", [&]() {
+      if (!vacuum_active_.load()) {
+        RCLCPP_ERROR(this->get_logger(), "Vacuum not active, cannot pick wire");
+        return false;
+      }
+      auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, 0.015);
+      if (!ok_lift) return false;
+      
+      joglinear(0.015, 0, 0);
+      joglinear(-0.015, 0, 0); // shake wire a bit
+      
+      if (!ngripper(true, 0)) return false;
+      
+      auto [ok_move, msg_move] = movelinear(0.017, -0.746, 0.707, -0.706, 0.708, 0.005, -0.005);
+      return ok_move;
+    })) {
+      return {false, "Step 5: Wire pickup failed"};
+    }
+    
+    // Publish status: Wire Picked
+    publish_status("Wire Picked");
+
+    // Step 6: Move to place jig
+    if (!execute_with_retry("Step 6: Move to place jig", [&]() {
+      auto [ok1, msg1] = movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061);
+      if (!ok1) return false;
+      auto [ok2, msg2] = movelinear(0.722, -0.260, 0.589, 0.998, 0.016, 0.020, -0.061);
+      if (!ok2) return false;
+      auto [ok3, msg3] = movelinear(0.699, -0.278, 0.577, 0.998, 0.016, 0.020, -0.061);
+      return ok3;
+    })) {
+      return {false, "Step 6: Move to place jig failed"};
+    }
+
+    // Step 7: Place wire in jig
+    if (!execute_with_retry("Step 7: Place wire in jig", [&]() {
+      if (!send_arduino_command('p')) return false;
+      if (!ngripper(true, 1)) return false;
+      if (!ngripper(false, 0)) return false;
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+      
+      auto [ok, msg] = movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061);
+      return ok;
+    })) {
+      return {false, "Step 7: Place wire in jig failed"};
+    }
+
+    // Step 8: Arduino sequence and gripper adjustments
+    if (!execute_with_retry("Step 8: Arduino sequence", [&]() {
+      if (!send_arduino_command('a')) return false;
+      if (!send_arduino_command('f')) return false;
+      if (!send_arduino_command('h')) return false;
+      if (!ngripper(true, 2)) return false;
+      if (!ngripper(false, 1)) return false;
+      if (!send_arduino_command('n')) return false;
+      return true;
+    })) {
+      return {false, "Step 8: Arduino sequence failed"};
+    }
+
+    // Step 9: Tip operations
+    if (!execute_with_retry("Step 9: Tip operations", [&]() {
+      auto [ok1, msg1] = movelinear(0.702, -0.269, 0.800, 0.720, -0.016, -0.514, 0.466);
+      if (!ok1) return false;
+      
+      if (!egripper(false)) return false;
+      
+      auto [ok2, msg2] = movelinear(0.702, -0.269, 0.508, 0.720, -0.016, -0.514, 0.466);
+      if (!ok2) return false;
+      
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+      if (!egripper(true)) return false;
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+      
+      if (!ngripper(false, 2)) return false;
+      
+      for (int i = 0; i < 3; ++i) {
+        if (!send_arduino_command('n')) return false;
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+      
+      auto [ok3, msg3] = movelinear(0.615, -0.360, 0.508, 0.720, -0.016, -0.514, 0.466);
+      if (!ok3) return false;
+      
+      auto [ok4, msg4] = movelinear(0.702, -0.269, 0.800, 0.720, -0.016, -0.514, 0.466);
+      return ok4;
+    })) {
+      return {false, "Step 9: Tip operations failed"};
+    }
+    
+    // Publish status: Orientation Checked
+    publish_status("Orientation Checked");
+
+    // Step 10: Move to connector top
+    if (!execute_with_retry("Step 10: Move to connector top", [&]() {
+      auto [ok, msg] = movelinear(0.784, -0.285, 0.800, 1.000, 0.005, -0.011, -0.020);
+      return ok;
+    })) {
+      return {false, "Step 10: Move to connector top failed"};
+    }
+
+    // Step 11: Connector insertion (using provided row and col)
+    // The final joglinear movements are optional - main insertion must succeed
+    bool connector_inserted = false;
+    if (!execute_with_retry("Step 11: Connector insertion", [&]() {
+      geometry_msgs::msg::Pose target_pose = connector_manager_.getConnectorPose(row, col);
+      
+      RCLCPP_INFO(get_logger(), "Inserting at row=%d, col=%d: position (%.3f, %.3f, %.3f)", 
+                  row, col, target_pose.position.x, target_pose.position.y, target_pose.position.z);
+      
+      auto [ok1, msg1] = movelinear(
+        target_pose.position.x, target_pose.position.y, target_pose.position.z,
+        target_pose.orientation.x, target_pose.orientation.y, 
+        target_pose.orientation.z, target_pose.orientation.w
+      );
+      if (!ok1) return false;
+      
+      connector_inserted = true;
       rclcpp::sleep_for(std::chrono::milliseconds(500));
+      
+      auto [ok2, msg2] = joglinear(0.0, 0.0, -0.007);
+      if (!ok2) {
+        RCLCPP_WARN(this->get_logger(), "Final jog down failed: %s (continuing)", msg2.c_str());
+      }
+      
+      if (!egripper(false)) return false;
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+      
+      auto [ok3, msg3] = joglinear(0.0, 0.0, 0.011);
+      if (!ok3) {
+        RCLCPP_WARN(this->get_logger(), "Jog up failed: %s (continuing)", msg3.c_str());
+      }
+      
+      if (!egripper(true)) return false;
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+      
+      auto [ok4, msg4] = joglinear(0.0, 0.0, -0.011);
+      if (!ok4) {
+        RCLCPP_WARN(this->get_logger(), "Final jog down failed: %s (continuing)", msg4.c_str());
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+      
+      return true;
+    })) {
+      if (!connector_inserted) {
+        return {false, "Step 11: Connector insertion failed - could not reach target position"};
+      }
+      RCLCPP_WARN(this->get_logger(), "Step 11: Connector insertion completed with minor issues (continuing)");
     }
-    joglinear(0.0, 0.0, -0.011);  
-   
-    rclcpp::sleep_for(std::chrono::milliseconds(500));
-    return true;
+    
+    // Publish status: Wire Inserted
+    publish_status("Wire Inserted");
+
+    // Step 12: Final positioning (optional - allowed to fail)
+    bool final_positioning_success = execute_with_retry("Step 12: Final positioning", [&]() {
+      if (!egripper(false)) return false;
+      
+      auto [ok1, msg1] = movelinear(0.788, -0.152, 0.650, 0.733, -0.680, -0.006, -0.035);
+      if (!ok1) return false;
+      
+      if (!egripper(false)) return false;
+      
+      auto [ok2, msg2] = movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061);
+      return ok2;
+    });
+    
+    if (!final_positioning_success) {
+      RCLCPP_WARN(this->get_logger(), "Step 12: Final positioning failed, but continuing (optional step)");
+    }
+
+    // All steps completed successfully (Step 12 failure is allowed)
+    RCLCPP_INFO(this->get_logger(), "Connector sequence for row=%d, col=%d completed successfully!", row, col);
+    return {true, "Connector sequence completed successfully for row=" + std::to_string(row) + ", col=" + std::to_string(col)};
   }
 
   geometry_msgs::msg::Pose getConnectorPose_affine(int row, int col)
@@ -871,6 +990,15 @@ private:
     //RCLCPP_INFO(get_logger(), "Cartesian path: %.1f%% achieved", fraction * 100.0);
 
     if (fraction > 0.8) {
+        // Check if trajectory exceeds maximum waypoints limit
+        const size_t max_waypoints = 20;
+        if (trajectory.joint_trajectory.points.size() > max_waypoints) {
+          RCLCPP_ERROR(get_logger(), "Jog trajectory has %zu points, exceeds maximum of %zu - aborting execution", 
+                      trajectory.joint_trajectory.points.size(), max_waypoints);
+          response = {false, "Jog trajectory exceeds 20 waypoints limit (" + std::to_string(trajectory.joint_trajectory.points.size()) + " points)"};
+          return response;
+        }
+        
         // Apply velocity and acceleration scaling by time-parameterizing the trajectory
         // Create a robot state for time parameterization
         moveit::core::RobotStatePtr robot_state(new moveit::core::RobotState(move_group.getRobotModel()));
@@ -878,6 +1006,11 @@ private:
         
         robot_trajectory::RobotTrajectory rt(move_group.getRobotModel(), move_group.getName());
         rt.setRobotTrajectoryMsg(*robot_state, trajectory);
+        
+        // Clear any existing time stamps to ensure fresh parameterization
+        for (auto& point : trajectory.joint_trajectory.points) {
+          point.time_from_start = rclcpp::Duration(0, 0);
+        }
         
         trajectory_processing::IterativeParabolicTimeParameterization time_param;
         bool success = time_param.computeTimeStamps(
@@ -887,20 +1020,24 @@ private:
         
         if (success) {
           rt.getRobotTrajectoryMsg(trajectory);
-          //RCLCPP_INFO(get_logger(), "Trajectory time-parameterized with vel=%.2f, acc=%.2f", 
-          //                velocity_scaling_, acceleration_scaling_);
+          RCLCPP_INFO(get_logger(), "Jog time-parameterized with vel=%.2f, acc=%.2f (offset: %.3f, %.3f, %.3f)", 
+                          velocity_scaling_, acceleration_scaling_, x_offset, y_offset, z_offset);
         } else {
-          //RCLCPP_WARN(get_logger(), "Time parameterization failed, using default timing");
+          RCLCPP_WARN(get_logger(), "Jog time parameterization failed, using default timing");
         }
         
         // Execute the time-parameterized path for an actual 1 cm step
         moveit::planning_interface::MoveGroupInterface::Plan plan;
         plan.trajectory_ = trajectory;
+        
+        // Add a small delay to allow controller to be ready
+        rclcpp::sleep_for(std::chrono::milliseconds(50));
+        
         auto exec_code = move_group.execute(plan);
 
-
         if (exec_code != moveit::core::MoveItErrorCode::SUCCESS) {
-          //RCLCPP_WARN(get_logger(), "Execution failed with code %d", exec_code.val);
+          RCLCPP_WARN(get_logger(), "Jog execution failed with code %d (offset: %.3f, %.3f, %.3f)", 
+                      exec_code.val, x_offset, y_offset, z_offset);
           response = {false, "Execution failed"};
         } else {
           //RCLCPP_INFO(get_logger(), "Linear step executed successfully");
@@ -977,6 +1114,15 @@ private:
     RCLCPP_INFO(get_logger(), "Cartesian path: %.1f%% achieved", fraction * 100.0);
 
     if (fraction > 0.8) {
+      // Check if trajectory exceeds maximum waypoints limit
+      const size_t max_waypoints = 20;
+      if (trajectory.joint_trajectory.points.size() > max_waypoints) {
+        RCLCPP_ERROR(get_logger(), "Trajectory has %zu points, exceeds maximum of %zu - aborting execution", 
+                    trajectory.joint_trajectory.points.size(), max_waypoints);
+        response = {false, "Trajectory exceeds 20 waypoints limit (" + std::to_string(trajectory.joint_trajectory.points.size()) + " points)"};
+        return response;
+      }
+      
       // Apply time parameterization for velocity/acceleration scaling
       moveit::core::RobotStatePtr robot_state(new moveit::core::RobotState(move_group.getRobotModel()));
       robot_state->setToDefaultValues();
@@ -996,13 +1142,19 @@ private:
       // Execute the trajectory
       moveit::planning_interface::MoveGroupInterface::Plan plan;
       plan.trajectory_ = trajectory;
+      RCLCPP_INFO(get_logger(), "Executing trajectory with %zu points...", 
+                  plan.trajectory_.joint_trajectory.points.size());
       auto execute_result =  move_group.execute(plan);
       // auto execute_result =  true;
       
       if (execute_result == moveit::core::MoveItErrorCode::SUCCESS) {
+        RCLCPP_INFO(get_logger(), "Trajectory execution SUCCESS");
+        // Add small delay to allow controller to finish and update state
+        rclcpp::sleep_for(std::chrono::milliseconds(100));
         response = {true, "Linear path executed successfully. Fraction: " + std::to_string(int(fraction * 100)) + "%"};
       } else {
-        response = {false, "Execution failed. Fraction: " + std::to_string(int(fraction * 100)) + "%"};
+        RCLCPP_ERROR(get_logger(), "Trajectory execution FAILED with error code: %d", execute_result.val);
+        response = {false, "Execution failed with code " + std::to_string(execute_result.val) + ". Fraction: " + std::to_string(int(fraction * 100)) + "%"};
       }
     } else {
       response = {false, "Cartesian path only " + std::to_string(int(fraction * 100)) + "% achievable - obstacles or joint limits"};
@@ -1170,6 +1322,16 @@ private:
     response->fraction = fraction;
 
     if (fraction > 0.8) {
+      // Check if trajectory exceeds maximum waypoints limit
+      const size_t max_waypoints = 20;
+      if (trajectory.joint_trajectory.points.size() > max_waypoints) {
+        RCLCPP_ERROR(get_logger(), "move_linear_quat trajectory has %zu points, exceeds maximum of %zu - aborting execution", 
+                    trajectory.joint_trajectory.points.size(), max_waypoints);
+        response->success = false;
+        response->message = "Trajectory exceeds 20 waypoints limit (" + std::to_string(trajectory.joint_trajectory.points.size()) + " points)";
+        return;
+      }
+      
       // Apply time parameterization for velocity/acceleration scaling
       moveit::core::RobotStatePtr robot_state(new moveit::core::RobotState(move_group.getRobotModel()));
       robot_state->setToDefaultValues();
@@ -1282,43 +1444,63 @@ private:
     
     try {
       // Process each grid position
-      for (const auto& position : request->positions) {
-        // Convert 1D position to row/col (assuming a grid layout)
-        // You may need to adjust this logic based on your grid structure
-        // Example: For an 8-column grid:
-        int cols = 8;  // Adjust based on your actual grid
-        int row = position / cols + 1;  // 1-based indexing
-        int col = position % cols + 1;  // 1-based indexing
+      for (size_t idx = 0; idx < request->positions.size(); ++idx) {
+        const auto& position = request->positions[idx];
         
-        RCLCPP_INFO(get_logger(), "Processing position %d -> (row=%d, col=%d)", position, row, col);
+        // Convert 1D position to row/col for 3x16 grid (3 rows, 16 columns)
+        // GUI sends 0-based indices (0-47 for 48 total positions)
+        // Grid layout: 3 rows × 16 columns = 48 positions
+        const int cols = 16;  // 16 columns per row
+        const int rows = 3;   // 3 rows total
         
-        // Get the connector pose for this grid position
-        geometry_msgs::msg::Pose target_pose = connector_manager_.getConnectorPose(row, col);
+        // Validate position is in valid range
+        if (position < 0 || position >= (rows * cols)) {
+          RCLCPP_WARN(get_logger(), "Ignoring invalid position %d (valid range: 0-%d)", position, (rows * cols - 1));
+          continue;  // Skip this position
+        }
         
-        RCLCPP_INFO(get_logger(), "Moving to position (%.3f, %.3f, %.3f)", 
-                    target_pose.position.x, target_pose.position.y, target_pose.position.z);
+        // Convert 0-based linear index to 1-based row/col
+        int row = (position / cols) + 1;  // 1-based row (1, 2, 3)
+        int col = (position % cols) + 1;  // 1-based col (1-16)
         
-        // Move to the position using movelinear
-        auto [success, message] = movelinear(
-          target_pose.position.x, target_pose.position.y, target_pose.position.z,
-          target_pose.orientation.x, target_pose.orientation.y, 
-          target_pose.orientation.z, target_pose.orientation.w
-        );
+        // Ignore positions with row > 3 or col > 10
+        if (row > 3 || col > 10) {
+          RCLCPP_WARN(get_logger(), "Ignoring position %d -> (row=%d, col=%d) [exceeds row<=3 or col<=10 constraint]", 
+                      position, row, col);
+          continue;  // Skip this position
+        }
+        
+        RCLCPP_INFO(get_logger(), "Processing grid position %zu/%zu: 0-based index %d -> 1-based (row=%d, col=%d)", 
+                    idx + 1, request->positions.size(), position, row, col);
+        
+        // Publish grid position update before starting
+        publish_grid_position(position);
+        
+        // Run the full connector insertion sequence for this grid position
+        auto [success, message] = run_connector_sequence(row, col);
         
         if (!success) {
-          RCLCPP_ERROR(get_logger(), "Failed to move to position %d: %s", position, message.c_str());
+          RCLCPP_ERROR(get_logger(), "Connector sequence failed for position %d (row=%d, col=%d): %s", 
+                       position, row, col, message.c_str());
           response->success = false;
-          response->message = "Failed at position " + std::to_string(position) + ": " + message;
+          response->message = "Failed at position " + std::to_string(position) + " (row=" + 
+                             std::to_string(row) + ", col=" + std::to_string(col) + "): " + message;
           return;
         }
         
-        // Optional: Add a small delay between movements
+        RCLCPP_INFO(get_logger(), "Successfully completed position %zu/%zu (row=%d, col=%d)", 
+                    idx + 1, request->positions.size(), row, col);
+        
+        // Publish "Done" after completing this position
+        publish_status("Done");
+        
+        // Small delay between positions
         rclcpp::sleep_for(std::chrono::milliseconds(500));
       }
       
       response->success = true;
       response->message = "Successfully processed " + std::to_string(request->positions.size()) + " grid positions";
-      RCLCPP_INFO(get_logger(), "All grid positions processed successfully");
+      RCLCPP_INFO(get_logger(), "All %zu grid positions processed successfully!", request->positions.size());
       
     } catch (const std::exception& e) {
       RCLCPP_ERROR(get_logger(), "Exception during grid position processing: %s", e.what());
