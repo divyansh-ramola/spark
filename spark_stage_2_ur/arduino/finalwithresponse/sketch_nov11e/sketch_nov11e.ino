@@ -26,8 +26,8 @@ int stepDelay_0 = 800;
 int stepDelay_0_find = 2000;
 
 // --- FIND METAL CONFIG ---
-#define MAX_FIND_STEPS_0 3000    // Maximum steps allowed for 'f' command (safety limit)
-#define EXTRA_STEPS_AFTER_DETECTION 250  // Extra steps after metal is detected ✅
+#define MAX_FIND_STEPS_0 5000    // Maximum steps allowed for 'f' command (safety limit)
+#define EXTRA_STEPS_AFTER_DETECTION 200 // Extra steps after metal is detected 
 
 long maxHomingSteps_0 = 200000;
 
@@ -137,8 +137,8 @@ bool findMetalMotor0() {
       }
 
       motor0Stopped = true;
-      break;
-    }
+      return true;   // Immediately exit after extra steps
+        }
   }
 
   if (!motor0Stopped) {

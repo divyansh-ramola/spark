@@ -19,7 +19,7 @@ public:
     ArduinoMotorController() : Node("arduino_motor_controller")
     {
         // Declare parameters
-        this->declare_parameter("serial_port", "/dev/ttyACM0");
+        this->declare_parameter("serial_port", "/dev/ttyACM1");
         this->declare_parameter("baud_rate", 115200);
         this->declare_parameter("timeout_ms", 30000);
 

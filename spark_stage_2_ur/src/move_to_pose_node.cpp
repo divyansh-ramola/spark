@@ -2,6 +2,7 @@
 #include <std_srvs/srv/trigger.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <std_msgs/msg/int32.hpp>
+#include <std_msgs/msg/bool.hpp>
 #include "spark_stage_2_ur/srv/move_to_pose.hpp"
 #include "spark_stage_2_ur/srv/move_linear_rpy.hpp"
 #include "spark_stage_2_ur/srv/move_linear_quat.hpp"
@@ -52,8 +53,8 @@ public:
   explicit MoveToPoseNode()
   : Node("move_to_pose_node", rclcpp::NodeOptions().automatically_declare_parameters_from_overrides(true)),
     move_group(std::shared_ptr<rclcpp::Node>(this, [](rclcpp::Node*){}), "ur_manipulator"),
-    velocity_scaling_(0.1),
-    acceleration_scaling_(0.1),
+    velocity_scaling_(0.4),
+    acceleration_scaling_(0.4),
     tf_buffer_(std::make_shared<tf2_ros::Buffer>(this->get_clock())),
     tf_listener_(std::make_shared<tf2_ros::TransformListener>(*tf_buffer_)),
     connector_manager_(this->get_logger())  // Automatically loads YAML in constructor
@@ -61,8 +62,8 @@ public:
     RCLCPP_INFO(this->get_logger(), "Move to Pose Node has been started.");
 
     // Declare and get velocity and acceleration scaling parameters
-    this->declare_parameter("velocity_scaling", 0.1);
-    this->declare_parameter("acceleration_scaling", 0.1);
+    this->declare_parameter("velocity_scaling", 0.4);
+    this->declare_parameter("acceleration_scaling", 0.4);
     
     velocity_scaling_ = this->get_parameter("velocity_scaling").as_double();
     acceleration_scaling_ = this->get_parameter("acceleration_scaling").as_double();
@@ -171,6 +172,7 @@ public:
     // Create status publishers
     grid_position_pub_ = create_publisher<std_msgs::msg::Int32>("/grid_position_update", 10);
     process_status_pub_ = create_publisher<std_msgs::msg::String>("/process_status", 10);
+    wire_quality_pub_ = create_publisher<std_msgs::msg::Bool>("/wire_quality", 10);
     RCLCPP_INFO(this->get_logger(), "Status publishers created");
     
     RCLCPP_INFO(this->get_logger(), "Node ready - services available:");
@@ -241,6 +243,7 @@ private:
   // Publishers for status updates
   rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr grid_position_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr process_status_pub_;
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr wire_quality_pub_;
 
 
   void vacuum_callback(const ur_msgs::msg::IOStates::SharedPtr msg)
@@ -266,10 +269,6 @@ private:
     const double voltage_drop = vacuum_initial_ - std::abs(analog);
     const double threshold = (0.87-0.73)/4;
     const bool over_threshold = (voltage_drop > threshold);
-
-    // Log continuously during descent to help debug
-    static int log_counter = 0;
-    
 
     if (over_threshold && !vacuum_active_.load()) {
       //RCLCPP_WARN(this->get_logger(), "WIRE DETECTED! voltage: %.3f V, drop: %.3f V (threshold: %.3f V)", 
@@ -366,7 +365,7 @@ private:
       double relative_y_move = y_offset_ - previous_y_offset;
       
       if (std::fabs(relative_y_move) > 1e-9) {
-        auto [ok_offset, msg_offset] = joglinear(relative_y_move, relative_y_move, 0.0);
+        auto [ok_offset, msg_offset] = joglinear(relative_y_move, 0.0, 0.0);
         {auto [ok_lift, msg_lift] = joglinear(0.0, 0.0, -0.010);}
         if (!ok_offset) {
           RCLCPP_WARN(this->get_logger(), "Offset move failed at try %d: %s", tries + 1, msg_offset.c_str());
@@ -471,12 +470,123 @@ private:
     RCLCPP_INFO(this->get_logger(), "Grid position update: %d", position);
   }
 
+  // Helper function to publish wire quality
+  void publish_wire_quality(bool quality)
+  {
+    auto msg = std_msgs::msg::Bool();
+    msg.data = quality;
+    wire_quality_pub_->publish(msg);
+    RCLCPP_INFO(this->get_logger(), "Wire quality: %s", quality ? "PASS" : "FAIL");
+  }
+
 
 
 
   // Function to send command to Arduino node
   // Input: command - character command ('h', 'f', 'm', 'n', 'p', 'q')
   // Returns: true if command executed successfully, false otherwise
+
+  // Recovery sequence when 'find metal' command fails
+  // Executes: 1 command + 4 movelinear + 2 gripper operations
+  bool execute_find_metal_recovery()
+  {
+    RCLCPP_WARN(this->get_logger(), "=== EXECUTING FIND METAL RECOVERY SEQUENCE ===");
+    
+    try {
+      // Command 1: Send 'h' (home) command
+      if (!send_arduino_command('m')) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Arduino command 'h' failed");
+        return false;
+      }
+      
+      // Move 1: Go up
+      auto [ok1, msg1] = movelinear(0.507, -0.260, 0.744, 0.708, 0.014, -0.520, 0.477);
+      if (!ok1) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Move 1 (up) failed: %s", msg1.c_str());
+        return false;
+      }
+      // Gripper 1: Release gripper 1
+      if (!egripper(true)) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Gripper 1 release failed");
+        return false;
+      }
+
+       // Gripper 1: Release gripper 1
+      if (!egripper2(false)) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Gripper 1 release failed");
+        return false;
+      }
+
+      // Move 2: Approach position
+      auto [ok2, msg2] = movelinear(0.508, -0.261, 0.482, 0.709, 0.015, -0.520, 0.477);
+      if (!ok2) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Move 2 (approach) failed: %s", msg2.c_str());
+        return false;
+      }
+      
+     
+      // Gripper 2: Close gripper 1
+      if (!egripper2(true)) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Gripper 1 close failed");
+        return false;
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+
+       
+      {
+        bool ok_grip = ngripper(false, 1);
+      }
+      rclcpp::sleep_for(std::chrono::milliseconds(500));
+      
+      
+      // Move 4: Move up
+      auto [ok4, msg4] = movelinear(0.507, -0.260, 0.744, 0.708, 0.014, -0.520, 0.477);
+      if (!ok4) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Move 4 (back up) failed: %s", msg4.c_str());
+        return false;
+      }
+
+      // Move 5: Move to position 2
+      auto [ok5, msg5] = movelinear(-0.065, -0.465, 0.930, -0.382, 0.923, -0.055, -0.007);
+      if (!ok5) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Move 5 (position 2) failed: %s", msg5.c_str());
+        return false;
+      }
+
+      // Move 6: Move to final position
+      auto [ok6, msg6] = movelinear(-0.403, -0.350, 0.602, -0.025, 1.000, 0.015, 0.001);
+      if (!ok6) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Move 6 (final position) failed: %s", msg6.c_str());
+        return false;
+      }
+
+      // Gripper 2: open gripper 1
+      if (!egripper2(false)) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Gripper 1 close failed");
+        return false;
+      }
+
+
+      joglinear(0.015, 0, 0);
+      joglinear(-0.015, 0, 0); // shake wire a bit
+
+      rclcpp::sleep_for(std::chrono::milliseconds(1000));
+
+      // Gripper 2: open gripper 1
+      if (!egripper2(true)) {
+        RCLCPP_ERROR(this->get_logger(), "Recovery: Gripper 1 close failed");
+        return false;
+      }
+
+      
+      RCLCPP_INFO(this->get_logger(), "Find metal recovery sequence completed successfully");
+      return true;
+      
+    } catch (const std::exception& e) {
+      RCLCPP_ERROR(this->get_logger(), "Exception during recovery sequence: %s", e.what());
+      return false;
+    }
+  }
 
   // Full connector insertion sequence for a specific row and column
   // Returns {success, message}
@@ -517,7 +627,7 @@ private:
 
     // Step 1: Initial positioning
     if (!execute_with_retry("Step 1: Initial positioning", [&]() {
-      auto [ok, msg] = movelinear(0.017, -0.746, 0.707, -0.706, 0.708, 0.005, -0.005);
+      auto [ok, msg] = movelinear(-0.295, -0.655, 0.836, 1.000, 0.023, -0.008, -0.008);
       return ok;
     })) {
       return {false, "Step 1: Initial positioning failed"};
@@ -541,7 +651,7 @@ private:
 
     // Step 3: Move to wire detection position
     if (!execute_with_retry("Step 3: Move to wire detection position", [&]() {
-      auto [ok, msg] = movelinear(0.014, -0.746, 0.314, -0.707, 0.707, 0.004, -0.005);
+      auto [ok, msg] = movelinear(-0.295, -0.655, 0.313, 1.000, 0.024, -0.008, -0.007);
       return ok;
     })) {
       return {false, "Step 3: Move to wire detection position failed"};
@@ -559,7 +669,7 @@ private:
       RCLCPP_WARN(this->get_logger(), "Fine scan failed, attempting coarse scan...");
       
       if (!execute_with_retry("Step 4b: Wire detection (coarse scan)", [&]() {
-        auto [ok, msg] = movelinear(0.014, -0.746, 0.314, -0.707, 0.707, 0.004, -0.005);
+        auto [ok, msg] = movelinear(-0.295, -0.655, 0.313, 1.000, 0.024, -0.008, -0.007);
         if (!ok) return false;
         
         const int no_of_tries = 7;
@@ -585,7 +695,7 @@ private:
       
       if (!ngripper(true, 0)) return false;
       
-      auto [ok_move, msg_move] = movelinear(0.017, -0.746, 0.707, -0.706, 0.708, 0.005, -0.005);
+      auto [ok_move, msg_move] = movelinear(-0.295, -0.655, 0.836, 1.000, 0.023, -0.008, -0.008);
       return ok_move;
     })) {
       return {false, "Step 5: Wire pickup failed"};
@@ -593,57 +703,123 @@ private:
     
     // Publish status: Wire Picked
     publish_status("Wire Picked");
+    
+    
 
     // Step 6: Move to place jig
-    if (!execute_with_retry("Step 6: Move to place jig", [&]() {
-      auto [ok1, msg1] = movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061);
+    if (!execute_with_retry("Step 6: Move to place jig (approach)", [&]() {
+      auto [ok1, msg1] = movelinear(0.378, -0.390, 0.836, 1.000, 0.024, -0.006, -0.006);
       if (!ok1) return false;
-      auto [ok2, msg2] = movelinear(0.722, -0.260, 0.589, 0.998, 0.016, 0.020, -0.061);
-      if (!ok2) return false;
-      auto [ok3, msg3] = movelinear(0.699, -0.278, 0.577, 0.998, 0.016, 0.020, -0.061);
-      return ok3;
+      return true;  // Must return true on success!
     })) {
-      return {false, "Step 6: Move to place jig failed"};
+      return {false, "Step 6: Move to place jig (approach) failed"};
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Approach complete, moving to jig position");
+    
+    // Step 6b: Lower to jig position
+    if (!execute_with_retry("Step 6b: Lower to jig position", [&]() {
+      auto [ok2, msg2] = movelinear(0.378, -0.390, 0.579, 1.000, 0.024, -0.006, -0.006);
+      if (!ok2) return false;
+      return true;  // Must return true on success!
+    })) {
+      return {false, "Step 6b: Lower to jig position failed"};
     }
 
+    // Step 6d: slide to jig position
+    if (!execute_with_retry("Step 6d: Slide to jig position", [&]() {
+      auto [ok2, msg2] = movelinear(0.357, -0.417, 0.579, 1.000, 0.024, -0.006, -0.006);
+      if (!ok2) return false;
+      return true;  // Must return true on success!
+    })) {
+      return {false, "Step 6d: Slide to jig position failed"};
+    }
+
+
+   
+    
     // Step 7: Place wire in jig
     if (!execute_with_retry("Step 7: Place wire in jig", [&]() {
-      if (!send_arduino_command('p')) return false;
+      // if (!send_arduino_command('p')) return false;
       if (!ngripper(true, 1)) return false;
       if (!ngripper(false, 0)) return false;
       rclcpp::sleep_for(std::chrono::milliseconds(1000));
       
-      auto [ok, msg] = movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061);
-      return ok;
+      
+      return true;
     })) {
       return {false, "Step 7: Place wire in jig failed"};
     }
 
-    // Step 8: Arduino sequence and gripper adjustments
-    if (!execute_with_retry("Step 8: Arduino sequence", [&]() {
-      if (!send_arduino_command('a')) return false;
-      if (!send_arduino_command('f')) return false;
-      if (!send_arduino_command('h')) return false;
-      if (!ngripper(true, 2)) return false;
-      if (!ngripper(false, 1)) return false;
-      if (!send_arduino_command('n')) return false;
-      return true;
+    // Step 6c: higher to jig position
+    if (!execute_with_retry("Step 6c: Higher to jig position", [&]() {
+      auto [ok2, msg2] = movelinear(0.357, -0.417, 0.800, 1.000, 0.024, -0.006, -0.006);
+      if (!ok2) return false;
+      return true;  // Must return true on success!
     })) {
-      return {false, "Step 8: Arduino sequence failed"};
+      return {false, "Step 6c: Higher to jig position failed"};
     }
+
+    // Step 8: Arduino sequence and gripper adjustments
+    // NOTE: This step does NOT use retry logic for 'f' command failure
+    RCLCPP_INFO(this->get_logger(), "=== Step 8: Arduino sequence ===");
+    
+    if (!send_arduino_command('a')) {
+      return {false, "Step 8: Command 'a' failed"};
+    }
+
+
+    
+    // Special handling for 'f' (find metal) command - NO RETRY
+    if (!send_arduino_command('f')) {
+      RCLCPP_ERROR(this->get_logger(), "Step 8: Command 'f' (find metal) FAILED - executing recovery sequence");
+      
+      // Publish wire quality: FAIL
+      publish_wire_quality(false);
+      
+      // Execute recovery sequence
+      if (!execute_find_metal_recovery()) {
+        return {false, "FIND_METAL_FAILED_WITH_RECOVERY_FAILED"};
+      }
+      
+      // Recovery succeeded - return special code to retry entire sequence
+      return {false, "FIND_METAL_FAILED_RETRY_SEQUENCE"};
+    }
+    
+    // Publish wire quality: PASS (find metal succeeded)
+    publish_wire_quality(true);
+    
+    if (!send_arduino_command('h')) {
+      return {false, "Step 8: Command 'h' failed"};
+    }
+    
+    if (!ngripper(true, 2)) {
+      return {false, "Step 8: Gripper 2 close failed"};
+    }
+    
+    if (!ngripper(false, 1)) {
+      return {false, "Step 8: Gripper 1 release failed"};
+    }
+    
+    if (!send_arduino_command('n')) {
+      return {false, "Step 8: Command 'n' failed"};
+    }
+    
+    RCLCPP_INFO(this->get_logger(), "Step 8: Arduino sequence completed successfully");
+
 
     // Step 9: Tip operations
     if (!execute_with_retry("Step 9: Tip operations", [&]() {
-      auto [ok1, msg1] = movelinear(0.702, -0.269, 0.800, 0.720, -0.016, -0.514, 0.466);
+      auto [ok1, msg1] = movelinear(0.336, -0.420, 0.785,0.710, 0.012, -0.494, 0.501);
       if (!ok1) return false;
       
-      if (!egripper(false)) return false;
+      if (!egripper(false)) return false;  // Pin 17 HIGH = small opening (open gripper)
       
-      auto [ok2, msg2] = movelinear(0.702, -0.269, 0.508, 0.720, -0.016, -0.514, 0.466);
+      auto [ok2, msg2] = movelinear(0.336, -0.420, 0.500, 0.710, 0.013, -0.494, 0.501);
       if (!ok2) return false;
       
       rclcpp::sleep_for(std::chrono::milliseconds(1000));
-      if (!egripper(true)) return false;
+      if (!egripper(true)) return false;  // Pin 17 LOW = fully closed (close gripper to grip tip)
       rclcpp::sleep_for(std::chrono::milliseconds(1000));
       
       if (!ngripper(false, 2)) return false;
@@ -652,30 +828,45 @@ private:
         if (!send_arduino_command('n')) return false;
       }
       rclcpp::sleep_for(std::chrono::milliseconds(1000));
+
+
+      //slide after pick 
       
-      auto [ok3, msg3] = movelinear(0.615, -0.360, 0.508, 0.720, -0.016, -0.514, 0.466);
+      auto [ok3, msg3] = movelinear(0.264, -0.497, 0.500, 0.710, 0.013, -0.494, 0.501);
       if (!ok3) return false;
       
-      auto [ok4, msg4] = movelinear(0.702, -0.269, 0.800, 0.720, -0.016, -0.514, 0.466);
-      return ok4;
+      auto [ok4, msg4] = movelinear(0.264, -0.497, 0.800, 0.710, 0.013, -0.494, 0.501);
+      return true ;
     })) {
       return {false, "Step 9: Tip operations failed"};
     }
+
+
     
     // Publish status: Orientation Checked
     publish_status("Orientation Checked");
 
     // Step 10: Move to connector top
     if (!execute_with_retry("Step 10: Move to connector top", [&]() {
-      auto [ok, msg] = movelinear(0.784, -0.285, 0.800, 1.000, 0.005, -0.011, -0.020);
+      auto [ok, msg] = movelinear(0.197, -0.696, 0.867, 1.000, -0.025, 0.011, -0.014);
       return ok;
     })) {
       return {false, "Step 10: Move to connector top failed"};
     }
 
+
+
+    
     // Step 11: Connector insertion (using provided row and col)
     // The final joglinear movements are optional - main insertion must succeed
     bool connector_inserted = false;
+    
+    // Save current speed settings
+    double saved_velocity = velocity_scaling_;
+    double saved_acceleration = acceleration_scaling_;
+    
+    //Slow down for precise connector insertion (adjust these values as needed)
+    
     if (!execute_with_retry("Step 11: Connector insertion", [&]() {
       geometry_msgs::msg::Pose target_pose = connector_manager_.getConnectorPose(row, col);
       
@@ -690,9 +881,16 @@ private:
       if (!ok1) return false;
       
       connector_inserted = true;
+      velocity_scaling_ = 0.02;  // Was 0.05, now 40% slower
+      acceleration_scaling_ = 0.02;  // Was 0.05, now 40% slower
+      move_group.setMaxVelocityScalingFactor(velocity_scaling_);
+      move_group.setMaxAccelerationScalingFactor(acceleration_scaling_);
+      RCLCPP_INFO(get_logger(), "Slowing down for connector insertion: vel=%.3f, acc=%.3f", 
+                  velocity_scaling_, acceleration_scaling_);
+    
       rclcpp::sleep_for(std::chrono::milliseconds(500));
       
-      auto [ok2, msg2] = joglinear(0.0, 0.0, -0.007);
+      auto [ok2, msg2] = joglinear(0.0, 0.0, -0.010);
       if (!ok2) {
         RCLCPP_WARN(this->get_logger(), "Final jog down failed: %s (continuing)", msg2.c_str());
       }
@@ -700,7 +898,7 @@ private:
       if (!egripper(false)) return false;
       rclcpp::sleep_for(std::chrono::milliseconds(500));
       
-      auto [ok3, msg3] = joglinear(0.0, 0.0, 0.011);
+      auto [ok3, msg3] = joglinear(0.0, 0.0, 0.008);
       if (!ok3) {
         RCLCPP_WARN(this->get_logger(), "Jog up failed: %s (continuing)", msg3.c_str());
       }
@@ -708,7 +906,7 @@ private:
       if (!egripper(true)) return false;
       rclcpp::sleep_for(std::chrono::milliseconds(500));
       
-      auto [ok4, msg4] = joglinear(0.0, 0.0, -0.011);
+      auto [ok4, msg4] = joglinear(0.0, 0.0, -0.008);
       if (!ok4) {
         RCLCPP_WARN(this->get_logger(), "Final jog down failed: %s (continuing)", msg4.c_str());
       }
@@ -722,6 +920,14 @@ private:
       RCLCPP_WARN(this->get_logger(), "Step 11: Connector insertion completed with minor issues (continuing)");
     }
     
+    // Restore original speed settings
+    velocity_scaling_ = saved_velocity;
+    acceleration_scaling_ = saved_acceleration;
+    move_group.setMaxVelocityScalingFactor(velocity_scaling_);
+    move_group.setMaxAccelerationScalingFactor(acceleration_scaling_);
+    RCLCPP_INFO(get_logger(), "Restored speed after connector insertion: vel=%.3f, acc=%.3f", 
+                velocity_scaling_, acceleration_scaling_);
+    
     // Publish status: Wire Inserted
     publish_status("Wire Inserted");
 
@@ -729,21 +935,30 @@ private:
     bool final_positioning_success = execute_with_retry("Step 12: Final positioning", [&]() {
       if (!egripper(false)) return false;
       
-      auto [ok1, msg1] = movelinear(0.788, -0.152, 0.650, 0.733, -0.680, -0.006, -0.035);
+      auto [ok1, msg1] = movelinear(0.197, -0.696, 0.867, 1.000, -0.025, 0.011, -0.014);
       if (!ok1) return false;
       
       if (!egripper(false)) return false;
       
-      auto [ok2, msg2] = movelinear(0.722, -0.260, 0.800, 0.998, 0.016, 0.020, -0.061);
+      auto [ok2, msg2] = movelinear(-0.057, -0.567, 0.901, 0.733, -0.680, -0.006, -0.035);
+      if (!ok2) return false;
+      
       return ok2;
     });
-    
+
+   
+   
     if (!final_positioning_success) {
       RCLCPP_WARN(this->get_logger(), "Step 12: Final positioning failed, but continuing (optional step)");
     }
 
     // All steps completed successfully (Step 12 failure is allowed)
     RCLCPP_INFO(this->get_logger(), "Connector sequence for row=%d, col=%d completed successfully!", row, col);
+    
+    // Calculate 0-based position from 1-based row/col (2 rows × 12 columns grid)
+    int position = (row - 1) * 12 + (col - 1);
+    publish_grid_position(position);
+    
     return {true, "Connector sequence completed successfully for row=" + std::to_string(row) + ", col=" + std::to_string(col)};
   }
 
@@ -833,9 +1048,55 @@ private:
     }
 
   bool egripper(const bool& state){
+      // Pin 16 HIGH = Large opening
+      // Pin 17 HIGH = Small opening
+      // Both LOW = Fully closed
+      // 
+      // state = false: Open with small opening (Pin 17 HIGH, Pin 16 LOW)
+      // state = true:  Fully closed (Both pins LOW)
 
-      int pin1 = 17; // actual pins on the ur controller box 
-      //int pin2 = 16;
+      int pin16 = 16;
+      int pin17 = 17;
+      bool success1 = false;
+      bool success2 = false;
+
+      // First, set Pin 16 to LOW always (we don't want large opening)
+      auto req1 = std::make_shared<ur_msgs::srv::SetIO::Request>();
+      req1->fun = ur_msgs::srv::SetIO::Request::FUN_SET_DIGITAL_OUT;
+      req1->pin = pin16;
+      req1->state = ur_msgs::srv::SetIO::Request::STATE_OFF;  // Always LOW
+      
+      auto future1 = gripper_client_->async_send_request(req1);
+      if (future1.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+        success1 = future1.get()->success;
+      }
+
+      // Then set Pin 17 based on state
+      auto req2 = std::make_shared<ur_msgs::srv::SetIO::Request>();
+      req2->fun = ur_msgs::srv::SetIO::Request::FUN_SET_DIGITAL_OUT;
+      req2->pin = pin17;
+      req2->state = (!state) ? ur_msgs::srv::SetIO::Request::STATE_ON    // false = HIGH (small opening)
+                             : ur_msgs::srv::SetIO::Request::STATE_OFF;  // true = LOW (fully closed)
+
+      auto future2 = gripper_client_->async_send_request(req2);
+      if (future2.wait_for(std::chrono::seconds(2)) == std::future_status::ready) {
+        success2 = future2.get()->success;
+      }
+
+      bool success = success1 && success2;
+      
+      RCLCPP_INFO(this->get_logger(),
+                  "egripper(%s): Pin16=LOW, Pin17=%s -> %s",
+                  state ? "true" : "false",
+                  (!state) ? "HIGH" : "LOW",
+                  success ? "OK" : "FAILED");
+
+      return success;
+    }
+  bool egripper2(const bool& state){
+
+      // int pin1 = 17; // actual pins on the ur controller box 
+      int pin1 = 16;
       bool success1 = false;
       bool success2 = true;
 
@@ -870,7 +1131,7 @@ private:
       //               pin, state ? "ON" : "OFF", success ? "OK" : "FAILED");
 
       return success;
-    }
+    }  
 
   bool ngripper(const bool& state ,const int& index){
     {
@@ -884,13 +1145,13 @@ private:
         pin_close = 4;  // Pin 4 HIGH = close
       }
       if (index == 1){
-        pin_open = 2;   // Pin 7 HIGH = open
-        pin_close = 1;  // Pin 6 HIGH = close
+        pin_open = 1;   // Pin 7 HIGH = open
+        pin_close = 2;  // Pin 6 HIGH = close
       }
 
       if (index == 2){
-        pin_open = 6;   // Pin 7 HIGH = open
-        pin_close = 7;  // Pin 6 HIGH = close
+        pin_open = 7;   // Pin 7 HIGH = open
+        pin_close = 6;  // Pin 6 HIGH = close
       }
 
 
@@ -1447,11 +1708,11 @@ private:
       for (size_t idx = 0; idx < request->positions.size(); ++idx) {
         const auto& position = request->positions[idx];
         
-        // Convert 1D position to row/col for 3x16 grid (3 rows, 16 columns)
-        // GUI sends 0-based indices (0-47 for 48 total positions)
-        // Grid layout: 3 rows × 16 columns = 48 positions
-        const int cols = 16;  // 16 columns per row
-        const int rows = 3;   // 3 rows total
+        // Convert 1D position to row/col for 2x12 grid (2 rows, 12 columns)
+        // GUI sends 0-based indices (0-23 for 24 total positions)
+        // Grid layout: 2 rows × 12 columns = 24 positions
+        const int cols = 12;  // 12 columns per row
+        const int rows = 2;   // 2 rows total
         
         // Validate position is in valid range
         if (position < 0 || position >= (rows * cols)) {
@@ -1460,31 +1721,57 @@ private:
         }
         
         // Convert 0-based linear index to 1-based row/col
-        int row = (position / cols) + 1;  // 1-based row (1, 2, 3)
-        int col = (position % cols) + 1;  // 1-based col (1-16)
-        
-        // Ignore positions with row > 3 or col > 10
-        if (row > 3 || col > 10) {
-          RCLCPP_WARN(get_logger(), "Ignoring position %d -> (row=%d, col=%d) [exceeds row<=3 or col<=10 constraint]", 
-                      position, row, col);
-          continue;  // Skip this position
-        }
+        int row = (position / cols) + 1;  // 1-based row (1, 2)
+        int col = (position % cols) + 1;  // 1-based col (1-12)
         
         RCLCPP_INFO(get_logger(), "Processing grid position %zu/%zu: 0-based index %d -> 1-based (row=%d, col=%d)", 
                     idx + 1, request->positions.size(), position, row, col);
         
         // Publish grid position update before starting
-        publish_grid_position(position);
         
         // Run the full connector insertion sequence for this grid position
-        auto [success, message] = run_connector_sequence(row, col);
+        // Retry logic for 'find metal' failure
+        bool sequence_success = false;
+        std::string sequence_message;
         
-        if (!success) {
-          RCLCPP_ERROR(get_logger(), "Connector sequence failed for position %d (row=%d, col=%d): %s", 
-                       position, row, col, message.c_str());
+        for (int attempt = 1; attempt <= 2; ++attempt) {
+          if (attempt > 1) {
+            RCLCPP_WARN(get_logger(), "Retrying entire sequence for position %d (row=%d, col=%d) - Attempt %d/2", 
+                        position, row, col, attempt);
+          }
+          
+          auto [success, message] = run_connector_sequence(row, col);
+          
+          // Check if this is a 'find metal' failure that requests retry
+          if (!success && message == "FIND_METAL_FAILED_RETRY_SEQUENCE") {
+            RCLCPP_WARN(get_logger(), "Find metal failed but recovery succeeded - retrying entire sequence");
+            sequence_message = message;
+            continue; // Retry the sequence
+          }
+          
+          // Check if recovery also failed
+          if (!success && message == "FIND_METAL_FAILED_WITH_RECOVERY_FAILED") {
+            RCLCPP_ERROR(get_logger(), "Find metal failed AND recovery failed - aborting");
+            sequence_success = false;
+            sequence_message = message;
+            break; // Don't retry if recovery failed
+          }
+          
+          // Normal success or failure
+          sequence_success = success;
+          sequence_message = message;
+          
+          if (success) {
+            break; // Success - no need to retry
+          }
+        }
+        
+        if (!sequence_success) {
+          RCLCPP_ERROR(get_logger(), "Connector sequence failed for position %d (row=%d, col=%d) after all attempts: %s", 
+                       position, row, col, sequence_message.c_str());
           response->success = false;
           response->message = "Failed at position " + std::to_string(position) + " (row=" + 
-                             std::to_string(row) + ", col=" + std::to_string(col) + "): " + message;
+                             std::to_string(row) + ", col=" + std::to_string(col) + "): " + sequence_message;
           return;
         }
         
